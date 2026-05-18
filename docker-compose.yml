@@ -1,0 +1,15 @@
+services:
+  letterboxd-cleanup-status:
+    build: .
+    ports:
+      - "5380:5380"
+    volumes:
+      - cleanup-data:/data:ro
+    environment:
+      - RADARR_URL=${RADARR_URL}
+      - DATA_DIR=/data
+      - PORT=5380
+    restart: unless-stopped
+
+volumes:
+  cleanup-data:
