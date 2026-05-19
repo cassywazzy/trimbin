@@ -1,111 +1,123 @@
-# letterboxd-cleanup
+# Trimbin
 
-Monitors your Letterboxd watched list and reports which movies are still on disk in Radarr.
+Media cleanup tool for the *arr ecosystem. Monitors your Letterboxd watched list and reports which movies are still on disk in Radarr — then lets you trim them with one click.
+
+Named after the **trim bin** — the wire basket next to a flatbed film editor where the discarded strips of celluloid collect after each cut.
 
 ## What it does
 
-letterboxd-cleanup scrapes your Letterboxd profile for watched films, resolves each to a TMDB ID, then cross-references your Radarr library to find watched movies still taking up storage. It posts a Discord digest of the results and serves a web UI so you can review them at a glance.
+Trimbin scrapes your Letterboxd profile for watched films, resolves each to a TMDB ID, then cross-references your Radarr library to find watched movies still taking up storage. It serves a web UI where you can review, trim (delete + unmonitor), or ignore them.
+
+## Features
+
+- **Watched-on-disk detection** — weekly scan cross-references Letterboxd watched list against Radarr library
+- **One-click trim** — delete movie files and unmonitor in Radarr from the web UI (with confirmation dialog)
+- **Ignore list** — push movies to a greyed-out secondary list to exclude them from reclaimable totals; restore them anytime
+- **Discord digest** — weekly notification of newly watched movies still on disk
+- **Status API** — JSON endpoint for dashboard widgets (Homepage, etc.)
+- **Trimmed counter** — tracks cumulative disk space reclaimed
 
 ## Architecture
 
-The project has two components:
+Two components in one container:
 
-- **cleanup-notify.py** -- A one-shot script meant to run on a weekly schedule (cron, systemd timer, etc.). It performs the Letterboxd scrape, Radarr lookup, and Discord notification, then writes status and movie-list JSON files to disk.
-- **status-server.py** -- A lightweight HTTP server that reads the JSON files written by the cleanup script and serves both a JSON API (for dashboard widgets) and an HTML web UI.
+- **cleanup-notify.py** — one-shot scanner that runs on a schedule (cron/timer). Scrapes Letterboxd, queries Radarr, writes status JSON, and posts to Discord.
+- **status-server.py** — always-running HTTP server. Reads the JSON files and serves the web UI + API. Handles trim/ignore actions via Radarr API.
 
-### Web UI
+## Web UI
 
-The status server provides a dark-themed page listing each watched-on-disk movie with its file size, a link to the movie on Letterboxd, and a direct link into Radarr. Summary stats at the top show total count, total size, and how many are new since the last scan.
+The status server provides a dark-themed dashboard at port 5380:
 
-### Discord notifications
+- Summary stats: watched on disk, reclaimable GB, new since last scan, total trimmed
+- Movie table with Letterboxd links, file sizes, and action buttons (Trim / Ignore / Radarr)
+- Confirmation dialog before any deletion
+- Ignored movies section (greyed out, with Restore button)
 
-On the first run, the cleanup script posts the full list of watched movies on disk (top 20 by size). On subsequent runs, it only reports newly watched movies that are still on disk. This keeps the notifications useful without being noisy.
+## API Endpoints
 
-### Homepage integration
-
-The `/api/status` endpoint returns JSON suitable for a [Homepage](https://gethomepage.dev/) `customapi` widget:
-
-```yaml
-- Letterboxd Cleanup:
-    widget:
-      type: customapi
-      url: http://letterboxd-cleanup:5380/api/status
-      mappings:
-        - field: watched_on_disk
-          label: Watched on disk
-        - field: total_gb
-          label: Total GB
-        - field: new_since_last
-          label: New since last
-```
-
-## Prerequisites
-
-- Python 3.12+
-- A Radarr instance with API access
-- A Letterboxd account (public profile)
-- (Optional) A Discord webhook URL for notifications
-- (Optional) A Healthchecks ping URL for dead-man's-switch monitoring
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | Web UI |
+| GET | `/api/status` | JSON status for dashboard widgets |
+| GET | `/ping` | Health check |
+| POST | `/api/trim/<tmdb_id>` | Delete files + unmonitor in Radarr |
+| POST | `/api/ignore/<tmdb_id>` | Add movie to ignore list |
+| POST | `/api/unignore/<tmdb_id>` | Remove movie from ignore list |
 
 ## Setup
 
-1. Clone the repository:
-
-   ```bash
-   git clone https://github.com/your-user/letterboxd-cleanup.git
-   cd letterboxd-cleanup
-   ```
-
-2. Copy the example environment file and fill in your values:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-3. Run with Docker Compose:
-
-   ```bash
-   docker compose up -d
-   ```
-
-   This starts the status server on port 5380. To run the cleanup scan, exec into the container:
-
-   ```bash
-   docker compose exec letterboxd-cleanup-status python cleanup-notify.py
-   ```
-
-   Or run it directly if you prefer not to use Docker:
-
-   ```bash
-   export $(grep -v '^#' .env | xargs)
-   python status-server.py &
-   python cleanup-notify.py
-   ```
-
-## Environment variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `LETTERBOXD_USER` | Yes | -- | Your Letterboxd username |
-| `RADARR_URL` | Yes | -- | Base URL of your Radarr instance (e.g. `http://radarr:7878`) |
-| `RADARR_API_KEY` | Yes | -- | Radarr API key |
-| `DISCORD_WEBHOOK_URL` | No | -- | Discord webhook URL for digest notifications |
-| `DATA_DIR` | No | `/data` | Directory for JSON state files |
-| `HC_PING_URL` | No | -- | Healthchecks ping URL for dead-man's-switch monitoring |
-| `PORT` | No | `5380` | Port for the status server |
-
-## Running the cleanup script manually
+### Docker (recommended)
 
 ```bash
-python cleanup-notify.py
+git clone https://github.com/your-user/trimbin.git
+cd trimbin
+cp .env.example .env
+# Edit .env with your values
+docker compose up -d
 ```
 
-The script reads environment variables (or an optional env file at the path in `CLEANUP_ENV_FILE`), scrapes Letterboxd, queries Radarr, writes status JSON, and posts to Discord if there are new results. It pings the Healthchecks URL at start and finish if configured.
+The status server starts automatically. To run the scan manually:
 
-## Shared TMDB slug cache
+```bash
+docker compose exec trimbin python cleanup-notify.py
+```
 
-The cleanup script maintains a `slug_to_tmdb.json` cache file in `DATA_DIR` that maps Letterboxd slugs to TMDB IDs. If you also run [letterboxd-sync](https://github.com/your-user/letterboxd-sync) and point both projects at the same data directory, they will share this cache, reducing redundant lookups against Letterboxd.
+For weekly scans, set up a cron job or systemd timer on the host:
+
+```bash
+docker compose exec trimbin python cleanup-notify.py
+```
+
+### Standalone
+
+```bash
+cp .env.example .env
+# Edit .env
+python status-server.py &    # Start the web UI
+python cleanup-notify.py     # Run a scan
+```
+
+## Configuration
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `LETTERBOXD_USER` | Yes | -- | Your Letterboxd username |
+| `RADARR_URL` | Yes | -- | Radarr base URL (e.g. `http://radarr:7878`) |
+| `RADARR_API_KEY` | Yes | -- | Radarr API key (Settings > General) |
+| `DISCORD_WEBHOOK_URL` | No | -- | Discord webhook for digest notifications |
+| `DATA_DIR` | No | `/data` | Directory for JSON state files |
+| `HC_PING_URL` | No | -- | Healthchecks.io ping URL for dead-man's switch |
+| `PORT` | No | `5380` | Web UI port |
+
+## Dashboard widget
+
+For [Homepage](https://gethomepage.dev/) (gethomepage):
+
+```yaml
+- Trimbin:
+    icon: mdi-filmstrip-off
+    href: http://trimbin:5380
+    widget:
+      type: customapi
+      url: http://trimbin:5380/api/status
+      mappings:
+        - field: watched_on_disk
+          label: On Disk
+        - field: total_gb
+          label: GB Reclaimable
+          format: suffix
+          suffix: " GB"
+        - field: new_since_last
+          label: New
+```
+
+## Roadmap
+
+- [ ] Jellyfin watch tracking (movies, shows, anime) via Jellystat integration
+- [ ] Sonarr support — same trim workflow for watched shows
+- [ ] Trakt integration as an alternative watch source
+- [ ] Multi-user awareness — "X of Y users have watched this"
 
 ## License
 
-[MIT](LICENSE)
+MIT

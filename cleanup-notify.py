@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Letterboxd watched-movie cleanup notifier.
+"""Trimbin scanner — weekly Letterboxd→Radarr cross-reference.
 
-Weekly one-shot: scrapes the user's Letterboxd "films" page (all watched),
-cross-references against Radarr's on-disk library, and posts a Discord digest
-listing watched movies still consuming storage — sorted largest first.
-
-First run: posts the full list. Subsequent runs: only highlights NEW watches
-since the last notification, plus a summary total line.
-
-Shares the slug→TMDB cache with letterboxd-sync (same /data volume).
+Scrapes the user's Letterboxd watched list, cross-references against Radarr's
+on-disk library, and posts a Discord digest listing watched movies still
+consuming storage. Writes status + movie-list JSON for the Trimbin web UI.
 """
 import json
 import logging
@@ -42,7 +37,7 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s",
                     stream=sys.stdout)
-log = logging.getLogger("lb-cleanup")
+log = logging.getLogger("trimbin")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SLUG_CACHE     = DATA_DIR / "slug_to_tmdb.json"
@@ -238,7 +233,7 @@ def main():
         return
 
     if first_run:
-        header = (f"**Letterboxd Cleanup Digest** — "
+        header = (f"**Trimbin Digest** — "
                   f"{total_count} watched movies still on disk ({total_gb:.0f} GB)\n\n"
                   f"First scan — showing top items by size:\n")
         show_list = watched_on_disk[:20]
@@ -246,7 +241,7 @@ def main():
         if total_count > 20:
             footer_extra = f"\n_...and {total_count - 20} more (full list: {total_count} movies)_\n"
     else:
-        header = (f"**Letterboxd Cleanup Digest** — "
+        header = (f"**Trimbin Digest** — "
                   f"{len(new_watches)} newly watched movie{'s' if len(new_watches) != 1 else ''} "
                   f"still on disk ({new_gb:.0f} GB)\n")
         show_list = new_watches[:25]

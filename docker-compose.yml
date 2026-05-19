@@ -1,15 +1,14 @@
 services:
-  letterboxd-cleanup-status:
+  trimbin:
     build: .
-    ports:
-      - "5380:5380"
-    volumes:
-      - cleanup-data:/data:ro
-    environment:
-      - RADARR_URL=${RADARR_URL}
-      - DATA_DIR=/data
-      - PORT=5380
+    container_name: trimbin
     restart: unless-stopped
+    ports:
+      - "${PORT:-5380}:5380"
+    volumes:
+      - trimbin_data:/data
+    env_file:
+      - .env
 
 volumes:
-  cleanup-data:
+  trimbin_data:
