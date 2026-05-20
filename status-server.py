@@ -11,6 +11,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from string import Template
 
+APP_DIR = Path(__file__).parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 STATUS_FILE = DATA_DIR / "cleanup_status.json"
 WATCHED_LIST_FILE = DATA_DIR / "cleanup_watched_list.json"
@@ -130,6 +131,7 @@ PAGE_TEMPLATE = Template("""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trimbin</title>
+<link rel="icon" type="image/png" href="/logo.png">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px;max-width:1000px;margin:0 auto}
@@ -222,6 +224,7 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 </head>
 <body>
 <div class="header-row">
+<img src="/logo.png" alt="Trimbin" style="height:40px;border-radius:6px">
 <h1>Trimbin</h1>
 <button class="refresh-btn" onclick="runScan(this)" title="Run scanner now">Scan</button>
 </div>
@@ -568,6 +571,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(data)
         elif self.path in ("/", "/status", "/ui"):
             self._serve_ui()
+        elif self.path == "/logo.png":
+            logo = APP_DIR / "logo.png"
+            if logo.exists():
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(logo.read_bytes())
+            else:
+                self.send_response(404)
+                self.end_headers()
         elif self.path == "/ping":
             self.send_response(200)
             self.end_headers()

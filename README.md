@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo.png" alt="Trimbin" width="128">
+</p>
+
 # Trimbin
 
 Media cleanup tool for the *arr ecosystem. Monitors your watched lists across multiple sources and reports which media is still on disk — then lets you trim it with one click.
