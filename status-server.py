@@ -3,7 +3,10 @@
 import json
 import html
 import os
+import subprocess
+import threading
 import urllib.request
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from string import Template
@@ -30,6 +33,7 @@ CONFIG_KEYS = [
     ("JELLYFIN_API_KEY", "Jellyfin API key", "jellystat"),
     ("DISCORD_WEBHOOK_URL", "Discord webhook URL", "notifications"),
     ("HC_PING_URL", "Healthchecks ping URL", "notifications"),
+    ("DIGEST_TIME", "Daily trim digest time (HH:MM, 24h)", "notifications"),
 ]
 
 SENSITIVE_KEYS = {"RADARR_API_KEY", "SONARR_API_KEY", "SIMKL_CLIENT_ID",
@@ -61,6 +65,63 @@ def get_radarr_url():
 
 def get_sonarr_url():
     return get_config("SONARR_URL").rstrip("/")
+
+
+TRIM_LOG_FILE = DATA_DIR / "trimbin_trim_log.json"
+
+
+def log_trim(title, size_gb, media_type="movie"):
+    log = load_json(TRIM_LOG_FILE, [])
+    log.append({
+        "title": title,
+        "size_gb": size_gb,
+        "type": media_type,
+        "trimmed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    save_json(TRIM_LOG_FILE, log)
+
+
+def post_daily_digest():
+    webhook = get_config("DISCORD_WEBHOOK_URL")
+    if not webhook:
+        return
+    log = load_json(TRIM_LOG_FILE, [])
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    todays_trims = [t for t in log if t["trimmed_at"].startswith(today)]
+    if not todays_trims:
+        return
+    total_gb = sum(t["size_gb"] for t in todays_trims)
+    trimmed = load_json(DATA_DIR / "trimbin_trimmed.json", {"count": 0, "gb": 0})
+    lines = [f"**Trimbin Daily Digest** — {len(todays_trims)} item{'s' if len(todays_trims) != 1 else ''} "
+             f"trimmed today ({total_gb:.1f} GB)\n"]
+    for t in todays_trims:
+        lines.append(f"- **{t['title']}** — {t['size_gb']} GB ({t['type']})")
+    lines.append(f"\n_Lifetime: {trimmed.get('count', 0)} items, {trimmed.get('gb', 0)} GB reclaimed_")
+    msg = "\n".join(lines)
+    try:
+        data = json.dumps({"content": msg[:2000]}).encode()
+        req = urllib.request.Request(webhook, data=data, method="POST")
+        req.add_header("Content-Type", "application/json")
+        urllib.request.urlopen(req, timeout=15)
+    except Exception:
+        pass
+
+
+def digest_scheduler():
+    """Background thread that posts daily trim digest at the configured time."""
+    last_posted_date = None
+    while True:
+        try:
+            digest_time = get_config("DIGEST_TIME") or "21:00"
+            h, m = (int(x) for x in digest_time.split(":"))
+            now = datetime.now()
+            today_str = now.strftime("%Y-%m-%d")
+            if now.hour == h and now.minute == m and last_posted_date != today_str:
+                post_daily_digest()
+                last_posted_date = today_str
+        except Exception:
+            pass
+        threading.Event().wait(30)
 
 
 PAGE_TEMPLATE = Template("""<!DOCTYPE html>
@@ -139,6 +200,12 @@ button.restore:hover{background:#00d474;color:#1a1a2e}
 button.save-btn{background:#00d474;color:#1a1a2e;border:none;padding:10px 32px;font-size:.9em;font-weight:600;border-radius:4px;cursor:pointer;margin-top:8px}
 button.save-btn:hover{background:#00b863}
 .settings-note{color:#666;font-size:.8em;margin-top:8px}
+.header-row{display:flex;align-items:center;gap:12px;margin-bottom:4px}
+button.refresh-btn{background:transparent;color:#00d474;border:1px solid #00d474;padding:6px 14px;font-size:.8em;border-radius:4px;cursor:pointer}
+button.refresh-btn:hover{background:#00d474;color:#1a1a2e}
+button.refresh-btn:disabled{opacity:.4;cursor:wait}
+button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
+@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 @media(max-width:600px){
   .summary{gap:8px}
   .stat{padding:10px 6px;min-width:70px}
@@ -154,7 +221,10 @@ button.save-btn:hover{background:#00b863}
 </style>
 </head>
 <body>
+<div class="header-row">
 <h1>Trimbin</h1>
+<button class="refresh-btn" onclick="runScan(this)" title="Run scanner now">Scan</button>
+</div>
 <p class="subtitle">Watched media still on disk &mdash; last scan: $last_run</p>
 <div class="summary">
 <div class="stat"><div class="value">$movies_count</div><div class="label">Movies</div></div>
@@ -261,6 +331,18 @@ function saveSettings() {
     .then(r => r.json())
     .then(d => { showToast(d.ok ? 'Settings saved' : 'Error: ' + d.error); if(d.ok) setTimeout(() => location.reload(), 800); })
     .catch(e => showToast('Error: ' + e));
+}
+
+function runScan(btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin">&#x21bb;</span> Scanning...';
+  fetch('/api/scan', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) { showToast('Scan complete'); setTimeout(() => location.reload(), 800); }
+      else { showToast('Scan error: ' + (d.error || 'unknown')); btn.disabled = false; btn.textContent = 'Scan'; }
+    })
+    .catch(e => { showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
 }
 
 function showToast(msg) {
@@ -416,6 +498,7 @@ def trim_movie(tmdb_id):
     if not target:
         return False, "Movie not found in Radarr"
 
+    title = target.get("title", "Unknown")
     size_gb = round(target.get("sizeOnDisk", 0) / (1024**3), 1)
     arr_api(radarr_url, radarr_key, "DELETE",
             f"/movie/{target['id']}?deleteFiles=true&addImportExclusion=false")
@@ -428,6 +511,7 @@ def trim_movie(tmdb_id):
     trimmed["count"] += 1
     trimmed["gb"] = round(trimmed["gb"] + size_gb, 1)
     save_json(DATA_DIR / "trimbin_trimmed.json", trimmed)
+    log_trim(title, size_gb, "movie")
 
     return True, "ok"
 
@@ -444,6 +528,7 @@ def trim_show(sonarr_id):
     if not target:
         return False, "Show not found in Sonarr"
 
+    title = target.get("title", "Unknown")
     size_gb = round(target.get("statistics", {}).get("sizeOnDisk", 0) / (1024**3), 1)
     arr_api(sonarr_url, sonarr_key, "DELETE",
             f"/series/{target['id']}?deleteFiles=true&addImportExclusion=false")
@@ -456,8 +541,22 @@ def trim_show(sonarr_id):
     trimmed["count"] += 1
     trimmed["gb"] = round(trimmed["gb"] + size_gb, 1)
     save_json(DATA_DIR / "trimbin_trimmed.json", trimmed)
+    log_trim(title, size_gb, "show")
 
     return True, "ok"
+
+
+def run_scan():
+    try:
+        result = subprocess.run(
+            ["python3", "/app/cleanup-notify.py"],
+            capture_output=True, text=True, timeout=600,
+        )
+        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
+    except subprocess.TimeoutExpired:
+        return False, "scan timed out"
+    except Exception as e:
+        return False, str(e)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -478,7 +577,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path == "/api/settings":
+        if self.path == "/api/scan":
+            ok, msg = run_scan()
+            self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path == "/api/settings":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
             save_json(CONFIG_FILE, body)
@@ -579,6 +681,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve():
+    t = threading.Thread(target=digest_scheduler, daemon=True)
+    t.start()
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
