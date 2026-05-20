@@ -6,11 +6,11 @@ Named after the **trim bin** — the wire basket next to a flatbed film editor w
 
 ## What it does
 
-Trimbin pulls watched movies and shows from Letterboxd, Trakt, and Jellystat, then cross-references your Radarr and Sonarr libraries to find watched content still consuming storage. It serves a web UI where you can review, trim (delete + unmonitor), or ignore them.
+Trimbin pulls watched movies and shows from Letterboxd, Simkl, and Jellystat, then cross-references your Radarr and Sonarr libraries to find watched content still consuming storage. It serves a web UI where you can review, trim (delete + unmonitor), or ignore them.
 
 ## Features
 
-- **Multi-source watch detection** — merges watched lists from Letterboxd, Trakt, and Jellystat
+- **Multi-source watch detection** — merges watched lists from Letterboxd, Simkl, and Jellystat
 - **Movie + show support** — cross-references Radarr (movies) and Sonarr (shows)
 - **Multi-user watch counts** — Jellystat integration shows "3/4 users watched" badges
 - **One-click trim** — delete files and unmonitor in Radarr/Sonarr from the web UI (with confirmation dialog)
@@ -24,7 +24,7 @@ Trimbin pulls watched movies and shows from Letterboxd, Trakt, and Jellystat, th
 
 Two components in one container:
 
-- **cleanup-notify.py** — one-shot scanner that runs on a schedule (cron/timer). Scrapes Letterboxd, queries Trakt/Jellystat/Jellyfin APIs, cross-references Radarr + Sonarr, writes status JSON, and posts to Discord.
+- **cleanup-notify.py** — one-shot scanner that runs on a schedule (cron/timer). Scrapes Letterboxd, queries Simkl/Jellystat/Jellyfin APIs, cross-references Radarr + Sonarr, writes status JSON, and posts to Discord.
 - **status-server.py** — always-running HTTP server. Reads the JSON files and serves the web UI + API. Handles trim/ignore actions via Radarr/Sonarr APIs.
 
 ## Watch sources
@@ -32,7 +32,7 @@ Two components in one container:
 | Source | What it provides | Auth |
 |--------|-----------------|------|
 | Letterboxd | Watched movies (scraped from profile) | Public profile, no key needed |
-| Trakt | Watched movies + shows with episode-level progress | Client ID only (public profiles) |
+| Simkl | Watched movies + shows + anime with episode-level progress | OAuth token (never expires) |
 | Jellystat | Per-user watch counts ("3 of 4 users watched") | API token |
 | Jellyfin | TMDB-to-Jellyfin ID mapping (needed for Jellystat) | API key |
 
@@ -59,6 +59,7 @@ The status server provides a dark-themed dashboard at port 5380:
 | POST | `/api/trim-show/<sonarr_id>` | Delete show files + remove from Sonarr |
 | POST | `/api/ignore/<tmdb_id>` | Add movie to ignore list |
 | POST | `/api/unignore/<tmdb_id>` | Remove movie from ignore list |
+| GET/POST | `/api/settings` | View/save integration settings |
 
 ## Setup
 
@@ -103,12 +104,12 @@ python cleanup-notify.py     # Run a scan
 | `RADARR_URL` | Radarr base URL (e.g. `http://radarr:7878`) |
 | `RADARR_API_KEY` | Radarr API key (Settings > General) |
 
-### Trakt integration
+### Simkl integration
 
 | Variable | Description |
 |----------|-------------|
-| `TRAKT_CLIENT_ID` | Trakt API client ID ([create app](https://trakt.tv/oauth/applications/new)) |
-| `TRAKT_USERNAME` | Trakt username (profile must be public) |
+| `SIMKL_CLIENT_ID` | Simkl API client ID ([create app](https://simkl.com/settings/developer/new/)) |
+| `SIMKL_ACCESS_TOKEN` | OAuth access token (use PIN auth flow, token never expires) |
 
 ### Sonarr integration
 

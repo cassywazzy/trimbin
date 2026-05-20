@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Trimbin scanner — multi-source watch cross-reference.
 
-Pulls watched movies/shows from Letterboxd, Trakt, and Jellystat, then
+Pulls watched movies/shows from Letterboxd, Simkl, and Jellystat, then
 cross-references against Radarr/Sonarr libraries to find watched content
 still consuming storage. Writes status JSON for the Trimbin web UI and
 posts a Discord digest.
@@ -25,18 +25,33 @@ if ENV_FILE.exists():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-LB_USER         = os.environ.get("LETTERBOXD_USER", "")
-RADARR_URL      = os.environ.get("RADARR_URL", "").rstrip("/")
-RADARR_API_KEY  = os.environ.get("RADARR_API_KEY", "")
-SONARR_URL      = os.environ.get("SONARR_URL", "").rstrip("/")
-SONARR_API_KEY  = os.environ.get("SONARR_API_KEY", "")
-TRAKT_CLIENT_ID = os.environ.get("TRAKT_CLIENT_ID", "")
-TRAKT_USERNAME  = os.environ.get("TRAKT_USERNAME", "")
-JELLYSTAT_URL   = os.environ.get("JELLYSTAT_URL", "").rstrip("/")
-JELLYSTAT_KEY   = os.environ.get("JELLYSTAT_API_KEY", "")
-DISCORD_WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
 DATA_DIR        = Path(os.environ.get("DATA_DIR", "/data"))
-HC_PING_URL     = os.environ.get("HC_PING_URL", "")
+CONFIG_FILE     = DATA_DIR / "trimbin_config.json"
+
+
+def _cfg(key):
+    """Read from UI config file first, then environment."""
+    try:
+        config = json.loads(CONFIG_FILE.read_text())
+        val = config.get(key, "")
+        if val:
+            return val
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return os.environ.get(key, "")
+
+
+LB_USER         = _cfg("LETTERBOXD_USER")
+RADARR_URL      = _cfg("RADARR_URL").rstrip("/")
+RADARR_API_KEY  = _cfg("RADARR_API_KEY")
+SONARR_URL      = _cfg("SONARR_URL").rstrip("/")
+SONARR_API_KEY  = _cfg("SONARR_API_KEY")
+SIMKL_CLIENT_ID = _cfg("SIMKL_CLIENT_ID")
+SIMKL_TOKEN     = _cfg("SIMKL_ACCESS_TOKEN")
+JELLYSTAT_URL   = _cfg("JELLYSTAT_URL").rstrip("/")
+JELLYSTAT_KEY   = _cfg("JELLYSTAT_API_KEY")
+DISCORD_WEBHOOK = _cfg("DISCORD_WEBHOOK_URL")
+HC_PING_URL     = _cfg("HC_PING_URL")
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
@@ -161,38 +176,105 @@ def _resolve_slug(slug, cache):
 
 
 # ---------------------------------------------------------------------------
-# Trakt API
+# Simkl API
 # ---------------------------------------------------------------------------
 
-def trakt_headers():
+def simkl_headers():
     return {
         "Content-Type": "application/json",
-        "trakt-api-version": "2",
-        "trakt-api-key": TRAKT_CLIENT_ID,
+        "simkl-api-key": SIMKL_CLIENT_ID,
+        "Authorization": f"Bearer {SIMKL_TOKEN}",
     }
 
 
-def fetch_trakt_movies():
-    if not TRAKT_CLIENT_ID or not TRAKT_USERNAME:
-        log.info("TRAKT_CLIENT_ID/TRAKT_USERNAME not set, skipping Trakt movies")
+def fetch_simkl_movies():
+    if not SIMKL_CLIENT_ID or not SIMKL_TOKEN:
+        log.info("SIMKL_CLIENT_ID/SIMKL_ACCESS_TOKEN not set, skipping Simkl movies")
         return {}
-    url = f"https://api.trakt.tv/users/{TRAKT_USERNAME}/watched/movies"
-    data = api_json(url, headers=trakt_headers())
+    url = "https://api.simkl.com/sync/all-items/movies/completed"
+    data = api_json(url, headers=simkl_headers())
+    watched = {}
+    for item in data.get("movies", []):
+        ids = item.get("movie", {}).get("ids", {})
+        tmdb = ids.get("tmdb")
+        if tmdb:
+            watched[int(tmdb)] = item["movie"].get("title", "")
+    log.info("simkl: %d watched movies", len(watched))
+    return watched
+
+
+def fetch_simkl_shows():
+    if not SIMKL_CLIENT_ID or not SIMKL_TOKEN:
+        log.info("SIMKL_CLIENT_ID/SIMKL_ACCESS_TOKEN not set, skipping Simkl shows")
+        return {}
+    shows = {}
+    for item_type in ("shows", "anime"):
+        url = f"https://api.simkl.com/sync/all-items/{item_type}/?extended=full"
+        data = api_json(url, headers=simkl_headers())
+        for item in data.get(item_type, []):
+            show_obj = item.get("show", item.get("anime", {}))
+            ids = show_obj.get("ids", {})
+            tvdb = ids.get("tvdb")
+            if not tvdb:
+                continue
+            tvdb = int(tvdb) if isinstance(tvdb, str) else tvdb
+            watched_eps = {}
+            for season in item.get("seasons", []):
+                snum = season["number"]
+                watched_eps[snum] = len(season.get("episodes", []))
+            total = sum(watched_eps.values())
+            if tvdb in shows:
+                existing = shows[tvdb]["total_watched_eps"]
+                if total <= existing:
+                    continue
+            shows[tvdb] = {
+                "title": show_obj.get("title", ""),
+                "year": show_obj.get("year"),
+                "tmdb": ids.get("tmdb"),
+                "watched_seasons": watched_eps,
+                "total_watched_eps": total,
+            }
+    log.info("simkl: %d watched shows", len(shows))
+    return shows
+
+
+# ---------------------------------------------------------------------------
+# Trakt API (kept for future use — not called by default)
+# ---------------------------------------------------------------------------
+
+def _trakt_headers():
+    client_id = os.environ.get("TRAKT_CLIENT_ID", "")
+    return {
+        "Content-Type": "application/json",
+        "trakt-api-version": "2",
+        "trakt-api-key": client_id,
+    }
+
+
+def _fetch_trakt_movies():
+    """Fetch watched movies from Trakt. Not used — enable by calling in main()."""
+    client_id = os.environ.get("TRAKT_CLIENT_ID", "")
+    username = os.environ.get("TRAKT_USERNAME", "")
+    if not client_id or not username:
+        return {}
+    url = f"https://api.trakt.tv/users/{username}/watched/movies"
+    data = api_json(url, headers=_trakt_headers())
     watched = {}
     for item in data:
         tmdb = item.get("movie", {}).get("ids", {}).get("tmdb")
         if tmdb:
             watched[tmdb] = item["movie"]["title"]
-    log.info("trakt: %d watched movies", len(watched))
     return watched
 
 
-def fetch_trakt_shows():
-    if not TRAKT_CLIENT_ID or not TRAKT_USERNAME:
-        log.info("TRAKT_CLIENT_ID/TRAKT_USERNAME not set, skipping Trakt shows")
+def _fetch_trakt_shows():
+    """Fetch watched shows from Trakt. Not used — enable by calling in main()."""
+    client_id = os.environ.get("TRAKT_CLIENT_ID", "")
+    username = os.environ.get("TRAKT_USERNAME", "")
+    if not client_id or not username:
         return {}
-    url = f"https://api.trakt.tv/users/{TRAKT_USERNAME}/watched/shows"
-    data = api_json(url, headers=trakt_headers())
+    url = f"https://api.trakt.tv/users/{username}/watched/shows"
+    data = api_json(url, headers=_trakt_headers())
     shows = {}
     for item in data:
         ids = item.get("show", {}).get("ids", {})
@@ -210,7 +292,6 @@ def fetch_trakt_shows():
             "watched_seasons": watched_eps,
             "total_watched_eps": sum(watched_eps.values()),
         }
-    log.info("trakt: %d watched shows", len(shows))
     return shows
 
 
@@ -263,8 +344,8 @@ def fetch_jellystat_total_users():
 # Jellyfin API (for ID mapping)
 # ---------------------------------------------------------------------------
 
-JELLYFIN_URL = os.environ.get("JELLYFIN_URL", "").rstrip("/")
-JELLYFIN_API_KEY = os.environ.get("JELLYFIN_API_KEY", "")
+JELLYFIN_URL = _cfg("JELLYFIN_URL").rstrip("/")
+JELLYFIN_API_KEY = _cfg("JELLYFIN_API_KEY")
 
 
 def jellyfin_lookup_by_tmdb(tmdb_id):
@@ -357,12 +438,12 @@ def main():
 
     # ---- Movies ----
     lb_watched = scrape_letterboxd_movies()
-    trakt_watched = fetch_trakt_movies()
+    simkl_watched = fetch_simkl_movies()
 
-    all_watched_tmdb = set(lb_watched.keys()) | set(trakt_watched.keys())
-    log.info("total unique watched movies: %d (LB=%d, Trakt=%d, overlap=%d)",
-             len(all_watched_tmdb), len(lb_watched), len(trakt_watched),
-             len(set(lb_watched) & set(trakt_watched)))
+    all_watched_tmdb = set(lb_watched.keys()) | set(simkl_watched.keys())
+    log.info("total unique watched movies: %d (LB=%d, Simkl=%d, overlap=%d)",
+             len(all_watched_tmdb), len(lb_watched), len(simkl_watched),
+             len(set(lb_watched) & set(simkl_watched)))
 
     if not all_watched_tmdb and LB_USER:
         log.error("no watched films found from any source, aborting")
@@ -384,8 +465,8 @@ def main():
             sources = []
             if tmdb_id in lb_watched:
                 sources.append("letterboxd")
-            if tmdb_id in trakt_watched:
-                sources.append("trakt")
+            if tmdb_id in simkl_watched:
+                sources.append("simkl")
 
             watch_count, watched_by = 0, []
             if JELLYSTAT_URL:
@@ -415,15 +496,15 @@ def main():
     log.info("movies on disk: %d (%.0f GB), %d new", total_count, total_gb, len(new_watches))
 
     # ---- Shows ----
-    trakt_shows = fetch_trakt_shows()
+    simkl_shows = fetch_simkl_shows()
     sonarr = get_sonarr_library()
     log.info("sonarr: %d shows with files on disk", len(sonarr))
 
     shows_on_disk = []
-    for tvdb_id, trakt_info in trakt_shows.items():
+    for tvdb_id, simkl_info in simkl_shows.items():
         if tvdb_id in sonarr:
             show = sonarr[tvdb_id]
-            watched_eps = trakt_info["total_watched_eps"]
+            watched_eps = simkl_info["total_watched_eps"]
             total_eps = show["episode_file_count"]
             pct = round(100 * watched_eps / total_eps) if total_eps > 0 else 0
             shows_on_disk.append({
@@ -436,7 +517,7 @@ def main():
                 "total_episodes": total_eps,
                 "season_count": show["season_count"],
                 "watched_pct": pct,
-                "watched_seasons": trakt_info["watched_seasons"],
+                "watched_seasons": simkl_info["watched_seasons"],
             })
     shows_on_disk.sort(key=lambda x: x["size_gb"], reverse=True)
 

@@ -13,11 +13,55 @@ STATUS_FILE = DATA_DIR / "cleanup_status.json"
 WATCHED_LIST_FILE = DATA_DIR / "cleanup_watched_list.json"
 SHOWS_LIST_FILE = DATA_DIR / "trimbin_shows.json"
 IGNORED_FILE = DATA_DIR / "trimbin_ignored.json"
-RADARR_URL = os.environ.get("RADARR_URL", "").rstrip("/")
-RADARR_API_KEY = os.environ.get("RADARR_API_KEY", "")
-SONARR_URL = os.environ.get("SONARR_URL", "").rstrip("/")
-SONARR_API_KEY = os.environ.get("SONARR_API_KEY", "")
+CONFIG_FILE = DATA_DIR / "trimbin_config.json"
 PORT = int(os.environ.get("PORT", "5380"))
+
+CONFIG_KEYS = [
+    ("LETTERBOXD_USER", "Letterboxd username", "letterboxd"),
+    ("RADARR_URL", "Radarr URL", "radarr"),
+    ("RADARR_API_KEY", "Radarr API key", "radarr"),
+    ("SONARR_URL", "Sonarr URL", "sonarr"),
+    ("SONARR_API_KEY", "Sonarr API key", "sonarr"),
+    ("SIMKL_CLIENT_ID", "Simkl client ID", "simkl"),
+    ("SIMKL_ACCESS_TOKEN", "Simkl access token", "simkl"),
+    ("JELLYSTAT_URL", "Jellystat URL", "jellystat"),
+    ("JELLYSTAT_API_KEY", "Jellystat API key", "jellystat"),
+    ("JELLYFIN_URL", "Jellyfin URL", "jellystat"),
+    ("JELLYFIN_API_KEY", "Jellyfin API key", "jellystat"),
+    ("DISCORD_WEBHOOK_URL", "Discord webhook URL", "notifications"),
+    ("HC_PING_URL", "Healthchecks ping URL", "notifications"),
+]
+
+SENSITIVE_KEYS = {"RADARR_API_KEY", "SONARR_API_KEY", "SIMKL_CLIENT_ID",
+                  "SIMKL_ACCESS_TOKEN", "JELLYSTAT_API_KEY", "JELLYFIN_API_KEY",
+                  "DISCORD_WEBHOOK_URL", "HC_PING_URL"}
+
+
+def load_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def save_json(path, data):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+    tmp.replace(path)
+
+
+def get_config(key):
+    config = load_json(CONFIG_FILE, {})
+    return config.get(key) or os.environ.get(key, "")
+
+
+def get_radarr_url():
+    return get_config("RADARR_URL").rstrip("/")
+
+
+def get_sonarr_url():
+    return get_config("SONARR_URL").rstrip("/")
+
 
 PAGE_TEMPLATE = Template("""<!DOCTYPE html>
 <html lang="en">
@@ -82,6 +126,19 @@ button.restore:hover{background:#00d474;color:#1a1a2e}
 .confirm-box button.yes{background:#e94560;color:#fff;border:none;padding:8px 24px;font-size:.9em;border-radius:4px}
 .confirm-box button.no{background:transparent;color:#888;border:1px solid #888;padding:8px 24px;font-size:.9em;border-radius:4px}
 .toast{display:none;position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#00d474;color:#1a1a2e;padding:12px 24px;border-radius:8px;font-weight:600;z-index:200}
+.settings-form{background:#16213e;border-radius:8px;padding:24px;margin-top:8px}
+.settings-group{margin-bottom:24px}
+.settings-group h3{color:#00d474;font-size:.95em;margin-bottom:12px;text-transform:uppercase;letter-spacing:.5px}
+.field{margin-bottom:12px;display:flex;align-items:center;gap:12px}
+.field label{min-width:180px;font-size:.85em;color:#aaa}
+.field input{flex:1;background:#0f3460;border:1px solid #1e2d4a;border-radius:4px;padding:8px 12px;color:#e0e0e0;font-size:.85em;font-family:monospace}
+.field input:focus{outline:none;border-color:#00d474}
+.field .status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.field .status-dot.set{background:#00d474}
+.field .status-dot.unset{background:#444}
+button.save-btn{background:#00d474;color:#1a1a2e;border:none;padding:10px 32px;font-size:.9em;font-weight:600;border-radius:4px;cursor:pointer;margin-top:8px}
+button.save-btn:hover{background:#00b863}
+.settings-note{color:#666;font-size:.8em;margin-top:8px}
 @media(max-width:600px){
   .summary{gap:8px}
   .stat{padding:10px 6px;min-width:70px}
@@ -91,6 +148,8 @@ button.restore:hover{background:#00d474;color:#1a1a2e}
   button,a.arr-link{font-size:.75em;padding:3px 6px}
   .tab{padding:8px 12px;font-size:.8em}
   .pct-bar{width:40px}
+  .field{flex-direction:column;align-items:stretch;gap:4px}
+  .field label{min-width:0}
 }
 </style>
 </head>
@@ -109,6 +168,7 @@ button.restore:hover{background:#00d474;color:#1a1a2e}
 <div class="tabs">
 <div class="tab active" onclick="switchTab('movies')">Movies</div>
 <div class="tab" onclick="switchTab('shows')">Shows</div>
+<div class="tab" onclick="switchTab('settings')">Settings</div>
 </div>
 
 <div id="tab-movies" class="tab-content active">
@@ -118,6 +178,10 @@ $ignored_section
 
 <div id="tab-shows" class="tab-content">
 $shows_table
+</div>
+
+<div id="tab-settings" class="tab-content">
+$settings_html
 </div>
 
 <div class="confirm-overlay" id="confirmOverlay">
@@ -186,6 +250,19 @@ function doRestore(tmdbId) {
     .then(d => { if(d.ok) location.reload(); else showToast('Error: ' + d.error); });
 }
 
+function saveSettings() {
+  var form = document.getElementById('settingsForm');
+  var data = {};
+  form.querySelectorAll('input[data-key]').forEach(function(input) {
+    var val = input.value.trim();
+    if (val) data[input.dataset.key] = val;
+  });
+  fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)})
+    .then(r => r.json())
+    .then(d => { showToast(d.ok ? 'Settings saved' : 'Error: ' + d.error); if(d.ok) setTimeout(() => location.reload(), 800); })
+    .catch(e => showToast('Error: ' + e));
+}
+
 function showToast(msg) {
   var t = document.getElementById('toast');
   t.textContent = msg;
@@ -202,20 +279,8 @@ def slug_from_title(title, year):
     return "-".join(s.split())
 
 
-def load_json(path, default):
-    try:
-        return json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
-
-
-def save_json(path, data):
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
-    tmp.replace(path)
-
-
 def build_movie_row(m, ignored=False):
+    radarr_url = get_radarr_url()
     badge_new = '<span class="badge new">NEW</span>' if m.get("new") and not ignored else ""
     sources = m.get("sources", [])
     badge_src = " ".join(f'<span class="badge src">{html.escape(s)}</span>' for s in sources)
@@ -236,10 +301,11 @@ def build_movie_row(m, ignored=False):
     if ignored:
         actions = f'<button class="restore" onclick="doRestore({tmdb})">Restore</button>'
     else:
+        arr_link = f'<a class="arr-link" href="{radarr_url}/movie/{rid}" target="_blank">Radarr</a>' if radarr_url else ''
         actions = (
             f'<button class="trim" onclick="confirmTrimMovie({tmdb}, \'{title_js}\')">Trim</button>'
             f'<button class="ignore" onclick="doIgnore({tmdb})">Ignore</button>'
-            f'<a class="arr-link" href="{RADARR_URL}/movie/{rid}" target="_blank">Radarr</a>'
+            f'{arr_link}'
         )
 
     return (
@@ -252,6 +318,7 @@ def build_movie_row(m, ignored=False):
 
 
 def build_show_row(s):
+    sonarr_url = get_sonarr_url()
     title = html.escape(s["title"])
     year = s.get("year", "?")
     size = s["size_gb"]
@@ -268,9 +335,10 @@ def build_show_row(s):
         f'{w_eps}/{t_eps} eps ({pct}%)'
     )
 
+    arr_link = f'<a class="arr-link" href="{sonarr_url}/series/{sid}" target="_blank">Sonarr</a>' if sonarr_url else ''
     actions = (
         f'<button class="trim" onclick="confirmTrimShow({sid}, \'{title_js}\')">Trim</button>'
-        f'<a class="arr-link" href="{SONARR_URL}/series/{sid}" target="_blank">Sonarr</a>'
+        f'{arr_link}'
     )
 
     return (
@@ -279,6 +347,49 @@ def build_show_row(s):
         f'<td class="size">{size} GB</td>'
         f'<td class="actions">{actions}</td></tr>'
     )
+
+
+def build_settings_html():
+    config = load_json(CONFIG_FILE, {})
+    groups = {}
+    for key, label, group in CONFIG_KEYS:
+        groups.setdefault(group, []).append((key, label))
+
+    group_titles = {
+        "letterboxd": "Letterboxd",
+        "radarr": "Radarr",
+        "sonarr": "Sonarr",
+        "simkl": "Simkl",
+        "jellystat": "Jellystat / Jellyfin",
+        "notifications": "Notifications",
+    }
+
+    parts = ['<form id="settingsForm" class="settings-form" onsubmit="event.preventDefault();saveSettings()">']
+    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications"]:
+        if group_key not in groups:
+            continue
+        parts.append(f'<div class="settings-group"><h3>{group_titles.get(group_key, group_key)}</h3>')
+        for key, label in groups[group_key]:
+            val = config.get(key, "")
+            env_val = os.environ.get(key, "")
+            has_value = bool(val or env_val)
+            dot_class = "set" if has_value else "unset"
+            is_sensitive = key in SENSITIVE_KEYS
+            input_type = "password" if is_sensitive else "text"
+            display_val = html.escape(val) if val else ""
+            placeholder = "(from environment)" if env_val and not val else ""
+            parts.append(
+                f'<div class="field">'
+                f'<span class="status-dot {dot_class}"></span>'
+                f'<label>{html.escape(label)}</label>'
+                f'<input type="{input_type}" data-key="{key}" value="{display_val}" placeholder="{placeholder}">'
+                f'</div>'
+            )
+        parts.append('</div>')
+    parts.append('<button type="submit" class="save-btn">Save settings</button>')
+    parts.append('<p class="settings-note">Settings are saved to the data directory. Environment variables are used as fallback when a field is empty.</p>')
+    parts.append('</form>')
+    return "\n".join(parts)
 
 
 def arr_api(base_url, api_key, method, path, body=None):
@@ -294,7 +405,9 @@ def arr_api(base_url, api_key, method, path, body=None):
 
 
 def trim_movie(tmdb_id):
-    movies = arr_api(RADARR_URL, RADARR_API_KEY, "GET", "/movie")
+    radarr_url = get_radarr_url()
+    radarr_key = get_config("RADARR_API_KEY")
+    movies = arr_api(radarr_url, radarr_key, "GET", "/movie")
     target = None
     for m in movies:
         if m.get("tmdbId") == tmdb_id:
@@ -304,7 +417,7 @@ def trim_movie(tmdb_id):
         return False, "Movie not found in Radarr"
 
     size_gb = round(target.get("sizeOnDisk", 0) / (1024**3), 1)
-    arr_api(RADARR_URL, RADARR_API_KEY, "DELETE",
+    arr_api(radarr_url, radarr_key, "DELETE",
             f"/movie/{target['id']}?deleteFiles=true&addImportExclusion=false")
 
     movies_list = load_json(WATCHED_LIST_FILE, [])
@@ -320,7 +433,9 @@ def trim_movie(tmdb_id):
 
 
 def trim_show(sonarr_id):
-    series = arr_api(SONARR_URL, SONARR_API_KEY, "GET", "/series")
+    sonarr_url = get_sonarr_url()
+    sonarr_key = get_config("SONARR_API_KEY")
+    series = arr_api(sonarr_url, sonarr_key, "GET", "/series")
     target = None
     for s in series:
         if s.get("id") == sonarr_id:
@@ -330,7 +445,7 @@ def trim_show(sonarr_id):
         return False, "Show not found in Sonarr"
 
     size_gb = round(target.get("statistics", {}).get("sizeOnDisk", 0) / (1024**3), 1)
-    arr_api(SONARR_URL, SONARR_API_KEY, "DELETE",
+    arr_api(sonarr_url, sonarr_key, "DELETE",
             f"/series/{target['id']}?deleteFiles=true&addImportExclusion=false")
 
     shows_list = load_json(SHOWS_LIST_FILE, [])
@@ -363,7 +478,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
-        if self.path.startswith("/api/trim-show/"):
+        if self.path == "/api/settings":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            save_json(CONFIG_FILE, body)
+            self._json_response({"ok": True})
+        elif self.path.startswith("/api/trim-show/"):
             sonarr_id = int(self.path.split("/")[-1])
             ok, msg = trim_show(sonarr_id)
             self._json_response({"ok": ok, "error": msg if not ok else None})
@@ -407,7 +527,6 @@ class Handler(BaseHTTPRequestHandler):
         active_gb = sum(m["size_gb"] for m in active_movies)
         shows_gb = sum(s["size_gb"] for s in shows)
 
-        # Movies table
         if active_movies:
             rows = "\n".join(build_movie_row(m) for m in active_movies)
             movies_table = (
@@ -417,7 +536,6 @@ class Handler(BaseHTTPRequestHandler):
         else:
             movies_table = '<div class="empty">No watched movies on disk. Next scan will populate this.</div>'
 
-        # Ignored section
         if ignored_movies:
             ig_rows = "\n".join(build_movie_row(m, ignored=True) for m in ignored_movies)
             ignored_html = (
@@ -429,7 +547,6 @@ class Handler(BaseHTTPRequestHandler):
         else:
             ignored_html = ""
 
-        # Shows table
         if shows:
             s_rows = "\n".join(build_show_row(s) for s in shows)
             shows_table = (
@@ -437,7 +554,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"<tbody>{s_rows}</tbody></table>"
             )
         else:
-            shows_table = '<div class="empty">No watched shows on disk. Enable Trakt + Sonarr to track shows.</div>'
+            shows_table = '<div class="empty">No watched shows on disk. Enable Simkl + Sonarr to track shows.</div>'
 
         page = PAGE_TEMPLATE.substitute(
             last_run=html.escape(status.get("last_run", "never")),
@@ -450,6 +567,7 @@ class Handler(BaseHTTPRequestHandler):
             movies_table=movies_table,
             ignored_section=ignored_html,
             shows_table=shows_table,
+            settings_html=build_settings_html(),
         )
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
