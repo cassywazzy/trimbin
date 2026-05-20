@@ -176,65 +176,171 @@ def _resolve_slug(slug, cache):
 
 
 # ---------------------------------------------------------------------------
-# Simkl API
+# Simkl API — follows official sync protocol (Phase 1 + Phase 2)
 # ---------------------------------------------------------------------------
+
+SIMKL_BASE = "https://api.simkl.com"
+SIMKL_ACTIVITY_FILE = DATA_DIR / "simkl_activity.json"
+SIMKL_CACHE_FILE = DATA_DIR / "simkl_cache.json"
+APP_NAME = "trimbin"
+APP_VERSION = "1.0"
+
 
 def simkl_headers():
     return {
         "Content-Type": "application/json",
         "simkl-api-key": SIMKL_CLIENT_ID,
         "Authorization": f"Bearer {SIMKL_TOKEN}",
+        "User-Agent": f"Trimbin/{APP_VERSION}",
     }
 
 
-def fetch_simkl_movies():
-    if not SIMKL_CLIENT_ID or not SIMKL_TOKEN:
-        log.info("SIMKL_CLIENT_ID/SIMKL_ACCESS_TOKEN not set, skipping Simkl movies")
-        return {}
-    url = "https://api.simkl.com/sync/all-items/movies/completed"
-    data = api_json(url, headers=simkl_headers())
+def simkl_url(path):
+    sep = "&" if "?" in path else "?"
+    return (f"{SIMKL_BASE}{path}{sep}"
+            f"client_id={SIMKL_CLIENT_ID}&app-name={APP_NAME}&app-version={APP_VERSION}")
+
+
+def simkl_get(path, timeout=60):
+    return api_json(simkl_url(path), headers=simkl_headers(), timeout=timeout)
+
+
+def _simkl_fetch_activities():
+    return api_json(simkl_url("/sync/activities"),
+                    headers=simkl_headers(), method="POST")
+
+
+def _simkl_needs_sync(activity_data, saved):
+    """Check if any watched timestamps changed since last sync."""
+    for category in ("movies", "shows", "anime"):
+        cat_data = activity_data.get(category, {})
+        new_ts = cat_data.get("watched_at") or cat_data.get("all")
+        old_ts = saved.get(f"{category}_watched_at", "")
+        if new_ts and new_ts != old_ts:
+            return True
+    return False
+
+
+def _parse_simkl_movies(data):
     watched = {}
     for item in data.get("movies", []):
         ids = item.get("movie", {}).get("ids", {})
         tmdb = ids.get("tmdb")
         if tmdb:
             watched[int(tmdb)] = item["movie"].get("title", "")
-    log.info("simkl: %d watched movies", len(watched))
     return watched
 
 
-def fetch_simkl_shows():
-    if not SIMKL_CLIENT_ID or not SIMKL_TOKEN:
-        log.info("SIMKL_CLIENT_ID/SIMKL_ACCESS_TOKEN not set, skipping Simkl shows")
-        return {}
+def _parse_simkl_shows(data, item_type="shows"):
     shows = {}
-    for item_type in ("shows", "anime"):
-        url = f"https://api.simkl.com/sync/all-items/{item_type}/?extended=full"
-        data = api_json(url, headers=simkl_headers())
-        for item in data.get(item_type, []):
-            show_obj = item.get("show", item.get("anime", {}))
-            ids = show_obj.get("ids", {})
-            tvdb = ids.get("tvdb")
-            if not tvdb:
-                continue
-            tvdb = int(tvdb) if isinstance(tvdb, str) else tvdb
-            watched_eps = {}
-            for season in item.get("seasons", []):
-                snum = season["number"]
-                watched_eps[snum] = len(season.get("episodes", []))
-            total = sum(watched_eps.values())
-            if tvdb in shows:
-                existing = shows[tvdb]["total_watched_eps"]
-                if total <= existing:
-                    continue
-            shows[tvdb] = {
-                "title": show_obj.get("title", ""),
-                "year": show_obj.get("year"),
-                "tmdb": ids.get("tmdb"),
-                "watched_seasons": watched_eps,
-                "total_watched_eps": total,
-            }
-    log.info("simkl: %d watched shows", len(shows))
+    for item in data.get(item_type, []):
+        show_obj = item.get("show", item.get("anime", {}))
+        ids = show_obj.get("ids", {})
+        tvdb = ids.get("tvdb")
+        if not tvdb:
+            continue
+        tvdb = int(tvdb) if isinstance(tvdb, str) else tvdb
+        watched_eps = {}
+        for season in item.get("seasons", []):
+            snum = season["number"]
+            watched_eps[snum] = len(season.get("episodes", []))
+        total = sum(watched_eps.values())
+        if tvdb in shows and shows[tvdb]["total_watched_eps"] >= total:
+            continue
+        shows[tvdb] = {
+            "title": show_obj.get("title", ""),
+            "year": show_obj.get("year"),
+            "tmdb": ids.get("tmdb"),
+            "watched_seasons": watched_eps,
+            "total_watched_eps": total,
+        }
+    return shows
+
+
+def fetch_simkl_movies():
+    if not SIMKL_CLIENT_ID or not SIMKL_TOKEN:
+        log.info("SIMKL_CLIENT_ID/SIMKL_ACCESS_TOKEN not set, skipping Simkl")
+        return {}
+
+    saved = load_json(SIMKL_ACTIVITY_FILE, {})
+    cache = load_json(SIMKL_CACHE_FILE, {"movies": {}, "shows": {}})
+    is_initial = not saved.get("initialized")
+
+    if is_initial:
+        # Phase 1: fetch each type separately, sequentially
+        log.info("simkl: initial sync (Phase 1)")
+        data = simkl_get("/sync/movies/completed")
+        movies = _parse_simkl_movies(data)
+        time.sleep(1)
+        data = simkl_get("/sync/shows/?extended=full")
+        shows = _parse_simkl_shows(data, "shows")
+        time.sleep(1)
+        data = simkl_get("/sync/anime/?extended=full")
+        anime_shows = _parse_simkl_shows(data, "anime")
+        shows.update(anime_shows)
+
+        cache = {"movies": {str(k): v for k, v in movies.items()},
+                 "shows": {str(k): v for k, v in shows.items()}}
+        save_json(SIMKL_CACHE_FILE, cache)
+
+        activity = _simkl_fetch_activities()
+        saved = {"initialized": True}
+        for cat in ("movies", "shows", "anime"):
+            cat_data = activity.get(cat, {})
+            saved[f"{cat}_watched_at"] = cat_data.get("watched_at") or cat_data.get("all") or ""
+        save_json(SIMKL_ACTIVITY_FILE, saved)
+
+        log.info("simkl initial: %d movies, %d shows", len(movies), len(shows))
+        return movies
+
+    # Phase 2: check activity, delta sync if changed
+    activity = _simkl_fetch_activities()
+    if not _simkl_needs_sync(activity, saved):
+        log.info("simkl: no changes since last sync, using cache")
+        return {int(k): v for k, v in cache.get("movies", {}).items()}
+
+    date_from = saved.get("movies_watched_at") or saved.get("shows_watched_at") or ""
+    if not date_from:
+        log.info("simkl: no saved timestamp, falling back to initial sync")
+        saved.pop("initialized", None)
+        save_json(SIMKL_ACTIVITY_FILE, saved)
+        return fetch_simkl_movies()
+
+    log.info("simkl: delta sync from %s", date_from)
+    data = simkl_get(f"/sync/all-items/?date_from={date_from}&extended=full")
+
+    delta_movies = _parse_simkl_movies(data)
+    delta_shows = _parse_simkl_shows(data, "shows")
+    delta_anime = _parse_simkl_shows(data, "anime")
+    delta_shows.update(delta_anime)
+
+    # Merge into cache
+    for k, v in delta_movies.items():
+        cache.setdefault("movies", {})[str(k)] = v
+    for k, v in delta_shows.items():
+        cache.setdefault("shows", {})[str(k)] = v
+    save_json(SIMKL_CACHE_FILE, cache)
+
+    for cat in ("movies", "shows", "anime"):
+        cat_data = activity.get(cat, {})
+        ts = cat_data.get("watched_at") or cat_data.get("all") or ""
+        if ts:
+            saved[f"{cat}_watched_at"] = ts
+    save_json(SIMKL_ACTIVITY_FILE, saved)
+
+    movies = {int(k): v for k, v in cache.get("movies", {}).items()}
+    log.info("simkl: %d total movies (delta: %d new), %d delta shows",
+             len(movies), len(delta_movies), len(delta_shows))
+    return movies
+
+
+def fetch_simkl_shows():
+    """Returns shows from Simkl cache (populated by fetch_simkl_movies)."""
+    if not SIMKL_CLIENT_ID or not SIMKL_TOKEN:
+        return {}
+    cache = load_json(SIMKL_CACHE_FILE, {"movies": {}, "shows": {}})
+    shows = {int(k): v for k, v in cache.get("shows", {}).items()}
+    log.info("simkl: %d cached shows", len(shows))
     return shows
 
 
