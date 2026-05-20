@@ -1,19 +1,22 @@
 # Trimbin
 
-Media cleanup tool for the *arr ecosystem. Monitors your Letterboxd watched list and reports which movies are still on disk in Radarr — then lets you trim them with one click.
+Media cleanup tool for the *arr ecosystem. Monitors your watched lists across multiple sources and reports which media is still on disk — then lets you trim it with one click.
 
 Named after the **trim bin** — the wire basket next to a flatbed film editor where the discarded strips of celluloid collect after each cut.
 
 ## What it does
 
-Trimbin scrapes your Letterboxd profile for watched films, resolves each to a TMDB ID, then cross-references your Radarr library to find watched movies still taking up storage. It serves a web UI where you can review, trim (delete + unmonitor), or ignore them.
+Trimbin pulls watched movies and shows from Letterboxd, Trakt, and Jellystat, then cross-references your Radarr and Sonarr libraries to find watched content still consuming storage. It serves a web UI where you can review, trim (delete + unmonitor), or ignore them.
 
 ## Features
 
-- **Watched-on-disk detection** — weekly scan cross-references Letterboxd watched list against Radarr library
-- **One-click trim** — delete movie files and unmonitor in Radarr from the web UI (with confirmation dialog)
-- **Ignore list** — push movies to a greyed-out secondary list to exclude them from reclaimable totals; restore them anytime
-- **Discord digest** — weekly notification of newly watched movies still on disk
+- **Multi-source watch detection** — merges watched lists from Letterboxd, Trakt, and Jellystat
+- **Movie + show support** — cross-references Radarr (movies) and Sonarr (shows)
+- **Multi-user watch counts** — Jellystat integration shows "3/4 users watched" badges
+- **One-click trim** — delete files and unmonitor in Radarr/Sonarr from the web UI (with confirmation dialog)
+- **Ignore list** — push movies to a greyed-out secondary list; restore them anytime
+- **Tabbed UI** — separate Movies and Shows tabs with progress bars for episode completion
+- **Discord digest** — weekly notification of newly watched media still on disk
 - **Status API** — JSON endpoint for dashboard widgets (Homepage, etc.)
 - **Trimmed counter** — tracks cumulative disk space reclaimed
 
@@ -21,15 +24,27 @@ Trimbin scrapes your Letterboxd profile for watched films, resolves each to a TM
 
 Two components in one container:
 
-- **cleanup-notify.py** — one-shot scanner that runs on a schedule (cron/timer). Scrapes Letterboxd, queries Radarr, writes status JSON, and posts to Discord.
-- **status-server.py** — always-running HTTP server. Reads the JSON files and serves the web UI + API. Handles trim/ignore actions via Radarr API.
+- **cleanup-notify.py** — one-shot scanner that runs on a schedule (cron/timer). Scrapes Letterboxd, queries Trakt/Jellystat/Jellyfin APIs, cross-references Radarr + Sonarr, writes status JSON, and posts to Discord.
+- **status-server.py** — always-running HTTP server. Reads the JSON files and serves the web UI + API. Handles trim/ignore actions via Radarr/Sonarr APIs.
+
+## Watch sources
+
+| Source | What it provides | Auth |
+|--------|-----------------|------|
+| Letterboxd | Watched movies (scraped from profile) | Public profile, no key needed |
+| Trakt | Watched movies + shows with episode-level progress | Client ID only (public profiles) |
+| Jellystat | Per-user watch counts ("3 of 4 users watched") | API token |
+| Jellyfin | TMDB-to-Jellyfin ID mapping (needed for Jellystat) | API key |
+
+All sources are optional. Trimbin works with just Letterboxd + Radarr, and gains features as you add more integrations.
 
 ## Web UI
 
 The status server provides a dark-themed dashboard at port 5380:
 
-- Summary stats: watched on disk, reclaimable GB, new since last scan, total trimmed
-- Movie table with Letterboxd links, file sizes, and action buttons (Trim / Ignore / Radarr)
+- Summary stats: movies on disk, reclaimable GB, shows on disk, new since last scan, total trimmed
+- **Movies tab**: movie table with Letterboxd links, source badges, watch count badges, file sizes, and action buttons (Trim / Ignore / Radarr)
+- **Shows tab**: show table with episode progress bars, watched percentage, file sizes, and action buttons (Trim / Sonarr)
 - Confirmation dialog before any deletion
 - Ignored movies section (greyed out, with Restore button)
 
@@ -40,7 +55,8 @@ The status server provides a dark-themed dashboard at port 5380:
 | GET | `/` | Web UI |
 | GET | `/api/status` | JSON status for dashboard widgets |
 | GET | `/ping` | Health check |
-| POST | `/api/trim/<tmdb_id>` | Delete files + unmonitor in Radarr |
+| POST | `/api/trim/<tmdb_id>` | Delete movie files + remove from Radarr |
+| POST | `/api/trim-show/<sonarr_id>` | Delete show files + remove from Sonarr |
 | POST | `/api/ignore/<tmdb_id>` | Add movie to ignore list |
 | POST | `/api/unignore/<tmdb_id>` | Remove movie from ignore list |
 
@@ -79,15 +95,45 @@ python cleanup-notify.py     # Run a scan
 
 ## Configuration
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `LETTERBOXD_USER` | Yes | -- | Your Letterboxd username |
-| `RADARR_URL` | Yes | -- | Radarr base URL (e.g. `http://radarr:7878`) |
-| `RADARR_API_KEY` | Yes | -- | Radarr API key (Settings > General) |
-| `DISCORD_WEBHOOK_URL` | No | -- | Discord webhook for digest notifications |
-| `DATA_DIR` | No | `/data` | Directory for JSON state files |
-| `HC_PING_URL` | No | -- | Healthchecks.io ping URL for dead-man's switch |
-| `PORT` | No | `5380` | Web UI port |
+### Core (required)
+
+| Variable | Description |
+|----------|-------------|
+| `LETTERBOXD_USER` | Your Letterboxd username |
+| `RADARR_URL` | Radarr base URL (e.g. `http://radarr:7878`) |
+| `RADARR_API_KEY` | Radarr API key (Settings > General) |
+
+### Trakt integration
+
+| Variable | Description |
+|----------|-------------|
+| `TRAKT_CLIENT_ID` | Trakt API client ID ([create app](https://trakt.tv/oauth/applications/new)) |
+| `TRAKT_USERNAME` | Trakt username (profile must be public) |
+
+### Sonarr integration
+
+| Variable | Description |
+|----------|-------------|
+| `SONARR_URL` | Sonarr base URL (e.g. `http://sonarr:8989`) |
+| `SONARR_API_KEY` | Sonarr API key (Settings > General) |
+
+### Jellystat integration
+
+| Variable | Description |
+|----------|-------------|
+| `JELLYSTAT_URL` | Jellystat base URL (e.g. `http://jellystat:3000`) |
+| `JELLYSTAT_API_KEY` | Jellystat API token (from Jellystat settings) |
+| `JELLYFIN_URL` | Jellyfin base URL (e.g. `http://jellyfin:8096`) |
+| `JELLYFIN_API_KEY` | Jellyfin API key (Dashboard > API Keys) |
+
+### Monitoring
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DISCORD_WEBHOOK_URL` | -- | Discord webhook for digest notifications |
+| `DATA_DIR` | `/data` | Directory for JSON state files |
+| `HC_PING_URL` | -- | Healthchecks.io ping URL for dead-man's switch |
+| `PORT` | `5380` | Web UI port |
 
 ## Dashboard widget
 
@@ -109,14 +155,15 @@ For [Homepage](https://gethomepage.dev/) (gethomepage):
           suffix: " GB"
         - field: new_since_last
           label: New
+        - field: shows_on_disk
+          label: Shows
 ```
 
 ## Roadmap
 
-- [ ] Jellyfin watch tracking (movies, shows, anime) via Jellystat integration
-- [ ] Sonarr support — same trim workflow for watched shows
-- [ ] Trakt integration as an alternative watch source
-- [ ] Multi-user awareness — "X of Y users have watched this"
+- [ ] Show ignore list (same pattern as movies)
+- [ ] Multi-user awareness in show progress ("X of Y users have watched this")
+- [ ] Anime-specific tracking via AniList/MAL integration
 
 ## License
 
