@@ -269,14 +269,14 @@ def fetch_simkl_movies():
     if is_initial:
         # Phase 1: fetch each type separately, sequentially
         log.info("simkl: initial sync (Phase 1)")
-        data = simkl_get("/sync/movies/completed")
-        movies = _parse_simkl_movies(data)
+        data = simkl_get("/sync/all-items/movies/completed")
+        movies = _parse_simkl_movies(data or {})
         time.sleep(1)
-        data = simkl_get("/sync/shows/?extended=full")
-        shows = _parse_simkl_shows(data, "shows")
+        data = simkl_get("/sync/all-items/shows/?extended=full")
+        shows = _parse_simkl_shows(data or {}, "shows")
         time.sleep(1)
-        data = simkl_get("/sync/anime/?extended=full")
-        anime_shows = _parse_simkl_shows(data, "anime")
+        data = simkl_get("/sync/all-items/anime/?extended=full")
+        anime_shows = _parse_simkl_shows(data or {}, "anime")
         shows.update(anime_shows)
 
         cache = {"movies": {str(k): v for k, v in movies.items()},
@@ -309,9 +309,9 @@ def fetch_simkl_movies():
     log.info("simkl: delta sync from %s", date_from)
     data = simkl_get(f"/sync/all-items/?date_from={date_from}&extended=full")
 
-    delta_movies = _parse_simkl_movies(data)
-    delta_shows = _parse_simkl_shows(data, "shows")
-    delta_anime = _parse_simkl_shows(data, "anime")
+    delta_movies = _parse_simkl_movies(data or {})
+    delta_shows = _parse_simkl_shows(data or {}, "shows")
+    delta_anime = _parse_simkl_shows(data or {}, "anime")
     delta_shows.update(delta_anime)
 
     # Merge into cache
