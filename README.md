@@ -6,12 +6,6 @@
 
 Media cleanup tool for the *arr ecosystem. Monitors your watched lists across multiple sources and reports which media is still on disk — then lets you trim it with one click.
 
-Named after the **trim bin** — the wire basket next to a flatbed film editor where the discarded strips of celluloid collect after each cut.
-
-## What it does
-
-Trimbin pulls watched movies and shows from Letterboxd, Simkl, and Jellystat, then cross-references your Radarr and Sonarr libraries to find watched content still consuming storage. It serves a web UI where you can review, trim (delete + unmonitor), or ignore them.
-
 ## Features
 
 - **Multi-source watch detection** — merges watched lists from Letterboxd, Simkl, and Jellystat
@@ -166,7 +160,7 @@ For [Homepage](https://gethomepage.dev/) (gethomepage):
 
 ## Roadmap
 
-- [ ] Show ignore list (same pattern as movies)
+- [x] Show ignore list (same pattern as movies)
 - [ ] Multi-user awareness in show progress ("X of Y users have watched this")
 - [ ] Anime-specific tracking via AniList/MAL integration
 

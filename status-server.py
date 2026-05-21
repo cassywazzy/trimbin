@@ -2,7 +2,9 @@
 """Trimbin — web UI + API for managing watched media still on disk."""
 import json
 import html
+import hashlib
 import os
+import shutil
 import subprocess
 import threading
 import urllib.request
@@ -35,6 +37,7 @@ CONFIG_KEYS = [
     ("DISCORD_WEBHOOK_URL", "Discord webhook URL", "notifications"),
     ("HC_PING_URL", "Healthchecks ping URL", "notifications"),
     ("DIGEST_TIME", "Daily trim digest time (HH:MM, 24h)", "notifications"),
+    ("MEDIA_LIBRARIES", "Media library paths (comma-separated)", "scans"),
 ]
 
 SENSITIVE_KEYS = {"RADARR_API_KEY", "SONARR_API_KEY", "SIMKL_CLIENT_ID",
@@ -179,6 +182,8 @@ button.restore{color:#00d474;border-color:#00d474}
 button.restore:hover{background:#00d474;color:#1a1a2e}
 .ignored-section table{opacity:.5}
 .ignored-section:hover table{opacity:.8}
+details[open] .collapse-arrow{transform:rotate(90deg)}
+details summary::-webkit-details-marker{display:none}
 .empty{text-align:center;padding:40px 20px;color:#666}
 .confirm-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:100;justify-content:center;align-items:center}
 .confirm-overlay.active{display:flex}
@@ -239,9 +244,12 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 </div>
 
 <div class="tabs">
-<div class="tab active" onclick="switchTab('movies')">Movies</div>
-<div class="tab" onclick="switchTab('shows')">Shows</div>
-<div class="tab" onclick="switchTab('settings')">Settings</div>
+<div class="tab active" data-tab="movies" onclick="switchTab('movies')">Movies</div>
+<div class="tab" data-tab="shows" onclick="switchTab('shows')">Shows</div>
+<div class="tab" data-tab="duplicates" onclick="switchTab('duplicates')">Duplicates</div>
+<div class="tab" data-tab="trickplay" onclick="switchTab('trickplay')">Trickplay</div>
+<div class="tab" data-tab="cleanup" onclick="switchTab('cleanup')">Cleanup</div>
+<div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
 </div>
 
 <div id="tab-movies" class="tab-content active">
@@ -251,6 +259,19 @@ $ignored_section
 
 <div id="tab-shows" class="tab-content">
 $shows_table
+$ignored_shows_section
+</div>
+
+<div id="tab-duplicates" class="tab-content">
+$duplicates_html
+</div>
+
+<div id="tab-trickplay" class="tab-content">
+$trickplay_html
+</div>
+
+<div id="tab-cleanup" class="tab-content">
+$cleanup_html
 </div>
 
 <div id="tab-settings" class="tab-content">
@@ -272,25 +293,39 @@ $settings_html
 <script>
 let pendingUrl = null;
 let pendingTitle = '';
+let pendingRow = null;
+
+function reloadToTab(tab) {
+  window.location.hash = tab;
+  location.reload();
+}
 
 function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
-  event.target.classList.add('active');
+  document.querySelector('.tab[data-tab="' + name + '"]').classList.add('active');
+  window.location.hash = name;
 }
 
-function confirmTrimMovie(tmdbId, title) {
+(function() {
+  var h = window.location.hash.replace('#', '');
+  if (h && document.getElementById('tab-' + h)) switchTab(h);
+})();
+
+function confirmTrimMovie(tmdbId, title, btn) {
   pendingUrl = '/api/trim/' + tmdbId;
   pendingTitle = title;
+  pendingRow = btn ? btn.closest('tr') || btn.closest('.movie-row') : null;
   document.getElementById('confirmTitle').textContent = 'Trim movie?';
   document.getElementById('confirmText').textContent = 'Delete files for "' + title + '" and remove from Radarr?';
   document.getElementById('confirmOverlay').classList.add('active');
 }
 
-function confirmTrimShow(sonarrId, title) {
+function confirmTrimShow(sonarrId, title, btn) {
   pendingUrl = '/api/trim-show/' + sonarrId;
   pendingTitle = title;
+  pendingRow = btn ? btn.closest('tr') || btn.closest('.show-row') : null;
   document.getElementById('confirmTitle').textContent = 'Trim show?';
   document.getElementById('confirmText').textContent = 'Delete all files for "' + title + '" and remove from Sonarr?';
   document.getElementById('confirmOverlay').classList.add('active');
@@ -304,10 +339,27 @@ function closeConfirm() {
 function executeTrim() {
   if (!pendingUrl) return;
   var url = pendingUrl;
+  var title = pendingTitle;
+  var row = pendingRow;
+  var isBulk = url.indexOf('/api/delete-category/') !== -1;
   closeConfirm();
   fetch(url, {method: 'POST'})
     .then(r => r.json())
-    .then(d => { showToast(d.ok ? 'Trimmed: ' + pendingTitle : 'Error: ' + (d.error || 'unknown')); setTimeout(() => location.reload(), 1200); })
+    .then(d => {
+      if (d.ok) {
+        if (isBulk) {
+          var msg = 'Deleted ' + (d.deleted || 0) + ' items';
+          if (d.errors && d.errors.length) msg += ' (' + d.errors.length + ' errors)';
+          showToast(msg);
+          setTimeout(function(){ reloadToTab('cleanup'); }, 800);
+        } else {
+          showToast('Deleted: ' + title);
+          if (row) { row.style.transition = 'opacity 0.3s'; row.style.opacity = '0'; setTimeout(function(){ row.remove(); }, 350); }
+        }
+      } else {
+        showToast('Error: ' + (d.error || 'unknown'));
+      }
+    })
     .catch(e => showToast('Error: ' + e));
 }
 
@@ -321,6 +373,18 @@ function doRestore(tmdbId) {
   fetch('/api/unignore/' + tmdbId, {method: 'POST'})
     .then(r => r.json())
     .then(d => { if(d.ok) location.reload(); else showToast('Error: ' + d.error); });
+}
+
+function doIgnoreShow(tvdbId) {
+  fetch('/api/ignore-show/' + tvdbId, {method: 'POST'})
+    .then(r => r.json())
+    .then(d => { if(d.ok) reloadToTab('shows'); else showToast('Error: ' + d.error); });
+}
+
+function doRestoreShow(tvdbId) {
+  fetch('/api/unignore-show/' + tvdbId, {method: 'POST'})
+    .then(r => r.json())
+    .then(d => { if(d.ok) reloadToTab('shows'); else showToast('Error: ' + d.error); });
 }
 
 function saveSettings() {
@@ -343,6 +407,44 @@ function runScan(btn) {
     .then(r => r.json())
     .then(d => {
       if (d.ok) { showToast('Scan complete'); setTimeout(() => location.reload(), 800); }
+      else { showToast('Scan error: ' + (d.error || 'unknown')); btn.disabled = false; btn.textContent = 'Scan'; }
+    })
+    .catch(e => { showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
+}
+
+function confirmDeletePath(pathHash, label, btn) {
+  pendingUrl = '/api/delete-path/' + pathHash;
+  pendingTitle = label;
+  pendingRow = btn ? btn.closest('tr') || btn.closest('div') : null;
+  document.getElementById('confirmTitle').textContent = 'Delete from disk?';
+  document.getElementById('confirmText').textContent = 'Permanently delete "' + label + '"? This cannot be undone.';
+  document.getElementById('confirmOverlay').classList.add('active');
+}
+
+function confirmDeleteAllCategory(category, count, label) {
+  pendingUrl = '/api/delete-category/' + category;
+  pendingTitle = count + ' ' + label;
+  pendingRow = null;
+  document.getElementById('confirmTitle').textContent = 'Delete all ' + label + '?';
+  document.getElementById('confirmText').textContent = 'Permanently delete all ' + count + ' ' + label + '? This cannot be undone.';
+  document.getElementById('confirmOverlay').classList.add('active');
+}
+
+function doIgnoreDedup(groupKey) {
+  fetch('/api/ignore-dedup', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({key: groupKey})})
+    .then(r => r.json())
+    .then(d => { if(d.ok) reloadToTab('duplicates'); else showToast('Error: ' + d.error); });
+}
+
+function runStorageScan(type, btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin">&#x21bb;</span> Scanning...';
+  var tabMap = {dedup: 'duplicates', trickplay: 'trickplay', cleanup: 'cleanup'};
+  var tab = tabMap[type] || type;
+  fetch('/api/scan-' + type, {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) { showToast('Scan complete'); reloadToTab(tab); }
       else { showToast('Scan error: ' + (d.error || 'unknown')); btn.disabled = false; btn.textContent = 'Scan'; }
     })
     .catch(e => { showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
@@ -388,7 +490,7 @@ def build_movie_row(m, ignored=False):
     else:
         arr_link = f'<a class="arr-link" href="{radarr_url}/movie/{rid}" target="_blank">Radarr</a>' if radarr_url else ''
         actions = (
-            f'<button class="trim" onclick="confirmTrimMovie({tmdb}, \'{title_js}\')">Trim</button>'
+            f'<button class="trim" onclick="confirmTrimMovie({tmdb}, \'{title_js}\', this)">Trim</button>'
             f'<button class="ignore" onclick="doIgnore({tmdb})">Ignore</button>'
             f'{arr_link}'
         )
@@ -402,12 +504,16 @@ def build_movie_row(m, ignored=False):
     )
 
 
-def build_show_row(s):
+IGNORED_SHOWS_FILE = DATA_DIR / "trimbin_ignored_shows.json"
+
+
+def build_show_row(s, ignored=False):
     sonarr_url = get_sonarr_url()
     title = html.escape(s["title"])
     year = s.get("year", "?")
     size = s["size_gb"]
     sid = s.get("sonarr_id", "")
+    tvdb = s.get("tvdb_id", "")
     pct = s.get("watched_pct", 0)
     w_eps = s.get("watched_episodes", 0)
     t_eps = s.get("total_episodes", 0)
@@ -420,11 +526,15 @@ def build_show_row(s):
         f'{w_eps}/{t_eps} eps ({pct}%)'
     )
 
-    arr_link = f'<a class="arr-link" href="{sonarr_url}/series/{sid}" target="_blank">Sonarr</a>' if sonarr_url else ''
-    actions = (
-        f'<button class="trim" onclick="confirmTrimShow({sid}, \'{title_js}\')">Trim</button>'
-        f'{arr_link}'
-    )
+    if ignored:
+        actions = f'<button class="restore" onclick="doRestoreShow({tvdb})">Restore</button>'
+    else:
+        arr_link = f'<a class="arr-link" href="{sonarr_url}/series/{sid}" target="_blank">Sonarr</a>' if sonarr_url else ''
+        actions = (
+            f'<button class="trim" onclick="confirmTrimShow({sid}, \'{title_js}\', this)">Trim</button>'
+            f'<button class="ignore" onclick="doIgnoreShow({tvdb})">Ignore</button>'
+            f'{arr_link}'
+        )
 
     return (
         f'<tr><td>{title} <span class="year">({year})</span></td>'
@@ -447,10 +557,11 @@ def build_settings_html():
         "simkl": "Simkl",
         "jellystat": "Jellystat / Jellyfin",
         "notifications": "Notifications",
+    "scans": "Storage Scans",
     }
 
     parts = ['<form id="settingsForm" class="settings-form" onsubmit="event.preventDefault();saveSettings()">']
-    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications"]:
+    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications", "scans"]:
         if group_key not in groups:
             continue
         parts.append(f'<div class="settings-group"><h3>{group_titles.get(group_key, group_key)}</h3>')
@@ -474,6 +585,312 @@ def build_settings_html():
     parts.append('<button type="submit" class="save-btn">Save settings</button>')
     parts.append('<p class="settings-note">Settings are saved to the data directory. Environment variables are used as fallback when a field is empty.</p>')
     parts.append('</form>')
+    return "\n".join(parts)
+
+
+DEDUP_FILE = DATA_DIR / "dedup_scan.json"
+DEDUP_IGNORE_FILE = DATA_DIR / "dedup_ignore.json"
+TRICKPLAY_FILE = DATA_DIR / "trickplay_scan.json"
+CLEANUP_FILE = DATA_DIR / "cleanup_scan.json"
+
+
+def path_hash(p):
+    return hashlib.sha256(p.encode()).hexdigest()[:12]
+
+
+def fmt_size(gb=None, size_bytes=None):
+    if size_bytes is not None and (gb is None or gb == 0):
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        if size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.1f} KB"
+        if size_bytes < 1024 ** 3:
+            return f"{size_bytes / (1024**2):.1f} MB"
+        return f"{size_bytes / (1024**3):.1f} GB"
+    if gb is not None:
+        if gb < 0.01:
+            if size_bytes is not None:
+                return fmt_size(size_bytes=size_bytes)
+            return "< 1 MB"
+        if gb < 1.0:
+            return f"{gb * 1024:.0f} MB"
+        return f"{gb:.1f} GB"
+    return "0 B"
+
+
+def _no_libs_hint():
+    libs = get_config("MEDIA_LIBRARIES")
+    if not libs:
+        return (
+            '<div class="empty" style="margin-top:28px">'
+            'Set <b>Media library paths</b> in Settings to enable storage scans. '
+            'Comma-separated paths, e.g. <code>/media/movies,/media/tv,/media/anime</code>'
+            '</div>'
+        )
+    return ""
+
+
+def build_duplicates_html():
+    parts = []
+    dedup = load_json(DEDUP_FILE, {})
+    dedup_scan_time = dedup.get("last_scan", "never")
+    dupes = dedup.get("duplicates", [])
+    parts.append(
+        '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;margin-top:12px">'
+        '<h2 style="margin:0;border:none;padding:0">Duplicates</h2>'
+        f'<button class="refresh-btn" onclick="runStorageScan(\'dedup\', this)">Scan</button>'
+        f'<span style="color:#666;font-size:.8em">Last scan: {html.escape(dedup_scan_time)}</span>'
+        '</div>'
+    )
+    if dupes:
+        parts.append(
+            f'<div class="summary" style="margin-bottom:16px">'
+            f'<div class="stat"><div class="value">{len(dupes)}</div><div class="label">Duplicate groups</div></div>'
+            f'<div class="stat danger"><div class="value">{fmt_size(gb=dedup.get("total_waste_gb", 0))}</div><div class="label">Reclaimable</div></div>'
+            f'</div>'
+        )
+        by_lib = {}
+        for d in dupes:
+            libs_in_group = set(e.get("library", "other") for e in d.get("entries", []))
+            lib_key = sorted(libs_in_group)[0] if libs_in_group else "other"
+            by_lib.setdefault(lib_key, []).append(d)
+        for lib_name in sorted(by_lib.keys()):
+            parts.append(f'<h3 style="color:#888;margin:16px 0 8px;font-size:.9em;text-transform:capitalize">{html.escape(lib_name)}</h3>')
+            for d in by_lib[lib_name][:50]:
+                title = html.escape(d.get("title", "?"))
+                year = d.get("year", "?")
+                group_key = d.get("key", "")
+                gk_js = html.escape(group_key.replace("'", "\\'").replace('"', '\\"'))
+                parts.append(
+                    f'<div style="margin-bottom:20px">'
+                    f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">'
+                    f'<strong>{title}</strong> <span class="year">({year})</span>'
+                    f'<span style="color:#666;font-size:.8em">{d.get("copies", 0)} copies · {fmt_size(gb=d.get("total_gb", 0))} total</span>'
+                    f'<button class="ignore" onclick="doIgnoreDedup(\'{gk_js}\')">Ignore</button>'
+                    f'</div>'
+                    f'<table style="margin-bottom:0"><thead><tr><th>Copy</th><th>Quality</th><th>Size</th><th></th></tr></thead><tbody>'
+                )
+                for e in d.get("entries", []):
+                    dn = html.escape(e.get("dirname", "?"))
+                    label = html.escape(e.get("label", e.get("quality", "?")))
+                    sz = e.get("size_gb", 0)
+                    lib = html.escape(e.get("library", ""))
+                    ph = path_hash(e.get("path", ""))
+                    dn_js = html.escape(dn.replace("'", "\\'").replace('"', '\\"'))
+                    status = e.get("status", "complete")
+                    video_count = e.get("video_files", 0)
+                    total_count = e.get("total_files", 0)
+                    partial_count = e.get("partial_files", 0)
+                    status_badge = ''
+                    if status == "partial":
+                        status_badge = f' <span class="badge" style="background:#e6a817">INCOMPLETE ({partial_count} .part)</span>'
+                    elif status == "no_media":
+                        status_badge = ' <span class="badge new">NO VIDEO FILES</span>'
+                    file_info = f'{video_count} video' if video_count == 1 else f'{video_count} videos'
+                    file_info += f', {total_count} files total'
+                    parts.append(
+                        f'<tr><td style="font-size:.8em">{dn}{status_badge}'
+                        f'<br><span style="color:#666;font-size:.85em">{lib} · {file_info}</span></td>'
+                        f'<td>{label}</td>'
+                        f'<td class="size">{fmt_size(gb=sz)}</td>'
+                        f'<td class="actions"><button class="trim" onclick="confirmDeletePath(\'{ph}\', \'{dn_js}\', this)">Delete</button></td></tr>'
+                    )
+                parts.append('</tbody></table></div>')
+    else:
+        parts.append('<div class="empty">No duplicates found. Run a scan to check.</div>')
+    hint = _no_libs_hint()
+    if hint:
+        parts.append(hint)
+    return "\n".join(parts)
+
+
+def build_trickplay_html():
+    parts = []
+    trick = load_json(TRICKPLAY_FILE, {})
+    trick_scan_time = trick.get("last_scan", "never")
+    flagged = trick.get("flagged", [])
+    parts.append(
+        '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;margin-top:12px">'
+        '<h2 style="margin:0;border:none;padding:0">Trickplay / BIF</h2>'
+        f'<button class="refresh-btn" onclick="runStorageScan(\'trickplay\', this)">Scan</button>'
+        f'<span style="color:#666;font-size:.8em">Last scan: {html.escape(trick_scan_time)}</span>'
+        '</div>'
+    )
+    if flagged:
+        parts.append(
+            f'<div class="summary" style="margin-bottom:16px">'
+            f'<div class="stat"><div class="value">{trick.get("total_trickplay_dirs", 0)}</div><div class="label">Trickplay dirs</div></div>'
+            f'<div class="stat"><div class="value">{fmt_size(gb=trick.get("total_trickplay_gb", 0))}</div><div class="label">Total size</div></div>'
+            f'<div class="stat danger"><div class="value">{trick.get("flagged_count", 0)}</div><div class="label">Flagged</div></div>'
+            f'<div class="stat danger"><div class="value">{fmt_size(gb=trick.get("flagged_gb", 0))}</div><div class="label">Flagged size</div></div>'
+            f'</div>'
+        )
+        parts.append('<table><thead><tr><th>Movie/Show</th><th>Issues</th><th>Size</th><th></th></tr></thead><tbody>')
+        for f in flagged[:50]:
+            movie = html.escape(f.get("movie", "?"))
+            issue_badges = " ".join(
+                f'<span class="badge {"new" if i == "contains_video" else "src"}">{html.escape(i)}</span>'
+                for i in f.get("issues", [])
+            )
+            ph = path_hash(f.get("path", ""))
+            movie_js = html.escape(movie.replace("'", "\\'").replace('"', '\\"'))
+            parts.append(
+                f'<tr><td>{movie}<br><span style="color:#666;font-size:.75em">{html.escape(f.get("library", ""))}</span></td>'
+                f'<td>{issue_badges}</td>'
+                f'<td class="size">{fmt_size(gb=f.get("size_gb", 0))}</td>'
+                f'<td class="actions"><button class="trim" onclick="confirmDeletePath(\'{ph}\', \'{movie_js} trickplay\', this)">Delete</button></td></tr>'
+            )
+        parts.append('</tbody></table>')
+    else:
+        parts.append('<div class="empty">No trickplay issues found. Run a scan to check.</div>')
+    hint = _no_libs_hint()
+    if hint:
+        parts.append(hint)
+    return "\n".join(parts)
+
+
+CLEANUP_CATEGORIES = {
+    "executable": {
+        "label": "Executables",
+        "desc": "Windows executables (.exe/.bat/.scr/.msi) — security risk, never legitimate media. Full path shown for review.",
+        "safe": True,
+    },
+    "os_junk": {
+        "label": "OS Junk Files",
+        "desc": "Thumbs.db, .DS_Store, desktop.ini — created by Windows/macOS, never part of media.",
+        "safe": True,
+    },
+    "empty_dir": {
+        "label": "Empty Directories",
+        "desc": "Completely empty folders, usually left behind after a trim or failed download.",
+        "safe": True,
+    },
+    "junk_dir": {
+        "label": "Indexing Junk",
+        "desc": "@eaDir, .@__thumb — created by Synology/NAS indexing software, not part of media.",
+        "safe": True,
+    },
+    "scene_junk": {
+        "label": "Scene / Release Junk",
+        "desc": "RARBG.txt, .sfv, .srr, .torrent, .url — release-group promo files and checksums. Deleting will break seeding.",
+        "safe": False,
+    },
+    "sample": {
+        "label": "Sample Files",
+        "desc": "Short preview clips bundled with releases. Deleting will break seeding for that torrent.",
+        "safe": False,
+    },
+    "orphan_sub": {
+        "label": "Orphan Subtitles",
+        "desc": "Subtitle files (.srt/.ass/.sub) in directories with no video. May be part of a torrent.",
+        "safe": False,
+    },
+    "orphan_nfo": {
+        "label": "Orphan NFOs",
+        "desc": "Release info files in directories with no video. Almost always part of the original torrent.",
+        "safe": False,
+    },
+    "orphan_image": {
+        "label": "Orphan Images",
+        "desc": "Poster/backdrop images in directories with no video. Could be Jellyfin metadata or torrent extras.",
+        "safe": False,
+    },
+}
+
+DANGER_ORDER = ["executable"]
+SAFE_ORDER = ["os_junk", "empty_dir", "junk_dir"]
+RISKY_ORDER = ["scene_junk", "sample", "orphan_sub", "orphan_nfo", "orphan_image"]
+
+
+def build_cleanup_html():
+    parts = []
+    cleanup = load_json(CLEANUP_FILE, {})
+    cleanup_scan_time = cleanup.get("last_scan", "never")
+    cleanup_items = cleanup.get("items", [])
+    by_cat = cleanup.get("by_category", {})
+    parts.append(
+        '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;margin-top:12px">'
+        '<h2 style="margin:0;border:none;padding:0">Cleanup</h2>'
+        f'<button class="refresh-btn" onclick="runStorageScan(\'cleanup\', this)">Scan</button>'
+        f'<span style="color:#666;font-size:.8em">Last scan: {html.escape(cleanup_scan_time)}</span>'
+        '</div>'
+    )
+    if cleanup_items:
+        total_items = cleanup.get("total_items", 0)
+        total_size = fmt_size(gb=cleanup.get("total_gb", 0))
+        cat_chips = []
+        for cat, info in by_cat.items():
+            cat_info = CLEANUP_CATEGORIES.get(cat, {})
+            cat_label = cat_info.get("label", cat)
+            cat_chips.append(f'<span style="background:#0f3460;padding:3px 8px;border-radius:4px;font-size:.75em">'
+                             f'{html.escape(cat_label)}: {info["count"]}</span>')
+        parts.append(
+            f'<div style="background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:12px 16px;margin-bottom:16px">'
+            f'<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">'
+            f'<span style="font-size:1.1em;font-weight:700;color:#e94560">{total_items} items · {total_size}</span>'
+            f'<span style="color:#666">|</span>'
+            f'{" ".join(cat_chips)}'
+            f'</div></div>'
+        )
+
+        grouped = {}
+        for item in cleanup_items:
+            grouped.setdefault(item["category"], []).append(item)
+
+        def render_section(title, cat_order, badge_color, badge_text):
+            has_items = any(grouped.get(c) for c in cat_order)
+            if not has_items:
+                return
+            parts.append(
+                f'<h2 style="margin:20px 0 4px;border:none;padding:0;font-size:1em;color:#ccc">{title}'
+                f' <span class="badge" style="background:{badge_color};font-size:.7em;vertical-align:middle;margin-left:6px">{badge_text}</span></h2>'
+            )
+            for cat in cat_order:
+                cat_items = grouped.get(cat, [])
+                if not cat_items:
+                    continue
+                cat_info = CLEANUP_CATEGORIES.get(cat, {})
+                cat_label = cat_info.get("label", cat)
+                cat_desc = cat_info.get("desc", "")
+                cat_bytes = sum(i["size_bytes"] for i in cat_items)
+                parts.append(
+                    f'<details style="margin:8px 0">'
+                    f'<summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0">'
+                    f'<span style="color:#666;font-size:.85em;transition:transform .2s" class="collapse-arrow">&#9654;</span>'
+                    f'<span style="color:#ccc;font-weight:600;font-size:.9em">'
+                    f'{html.escape(cat_label)}</span>'
+                    f'<span style="color:#666;font-size:.8em">{len(cat_items)} items · {fmt_size(size_bytes=cat_bytes)}</span>'
+                    f'<button class="trim" style="font-size:.75em;padding:3px 10px" '
+                    f'onclick="event.stopPropagation();confirmDeleteAllCategory(\'{cat}\', {len(cat_items)}, \'{html.escape(cat_label)}\')">'
+                    f'Delete All</button>'
+                    f'</summary>'
+                    f'<p style="color:#666;font-size:.8em;margin:4px 0 8px 20px">{html.escape(cat_desc)}</p>'
+                )
+                parts.append('<table><thead><tr><th>Item</th><th>Size</th><th></th></tr></thead><tbody>')
+                for item in cat_items[:100]:
+                    label = html.escape(item.get("label", "?"))
+                    lib = html.escape(item.get("library", ""))
+                    sz_display = fmt_size(gb=item.get("size_gb", 0), size_bytes=item.get("size_bytes", 0))
+                    ph = path_hash(item.get("path", ""))
+                    label_js = html.escape(label.replace("'", "\\'").replace('"', '\\"'))
+                    is_dir = item.get("is_dir", False)
+                    icon = "&#128193;" if is_dir else "&#128196;"
+                    parts.append(
+                        f'<tr><td>{icon} {label}'
+                        f'<br><span style="color:#666;font-size:.75em">{lib}</span></td>'
+                        f'<td class="size">{sz_display}</td>'
+                        f'<td class="actions"><button class="trim" onclick="confirmDeletePath(\'{ph}\', \'{label_js}\', this)">Delete</button></td></tr>'
+                    )
+                parts.append('</tbody></table></details>')
+
+        render_section("Security concern — should not be in media libraries", DANGER_ORDER, "#e04040", "DANGER")
+        render_section("Safe to delete", SAFE_ORDER, "#00d474", "SAFE")
+        render_section("May affect torrent seeding", RISKY_ORDER, "#e6a817", "CAUTION")
+    else:
+        parts.append('<div class="empty">No cleanup items found. Run a scan to check.</div>')
+    hint = _no_libs_hint()
+    if hint:
+        parts.append(hint)
     return "\n".join(parts)
 
 
@@ -549,11 +966,87 @@ def trim_show(sonarr_id):
     return True, "ok"
 
 
+def resolve_path_hash(phash):
+    """Find a filesystem path matching a hash across all scan results."""
+    for scan_file in [DEDUP_FILE, TRICKPLAY_FILE]:
+        data = load_json(scan_file, {})
+        for group in data.get("duplicates", []):
+            for entry in group.get("entries", []):
+                if path_hash(entry.get("path", "")) == phash:
+                    return entry["path"], entry.get("dirname", "")
+        for item in data.get("flagged", []):
+            if path_hash(item.get("path", "")) == phash:
+                return item["path"], item.get("movie", "")
+    cleanup = load_json(CLEANUP_FILE, {})
+    for item in cleanup.get("items", []):
+        if path_hash(item.get("path", "")) == phash:
+            return item["path"], item.get("label", "")
+    return None, None
+
+
+def delete_path(phash):
+    target_path, label = resolve_path_hash(phash)
+    if not target_path:
+        return False, "Path not found in scan results"
+    if not os.path.exists(target_path):
+        return False, "Path no longer exists on disk"
+    if not any(target_path.startswith(p) for p in
+               [p.strip() for p in get_config("MEDIA_LIBRARIES").split(",") if p.strip()]):
+        return False, "Path is not under a configured media library"
+    try:
+        if os.path.isdir(target_path):
+            shutil.rmtree(target_path)
+        else:
+            os.remove(target_path)
+    except Exception as e:
+        return False, str(e)
+    return True, "ok"
+
+
 def run_scan():
     try:
         result = subprocess.run(
             ["python3", "/app/cleanup-notify.py"],
             capture_output=True, text=True, timeout=600,
+        )
+        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
+    except subprocess.TimeoutExpired:
+        return False, "scan timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def run_dedup_scan():
+    try:
+        result = subprocess.run(
+            ["python3", "/app/dedup-scan.py"],
+            capture_output=True, text=True, timeout=300,
+        )
+        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
+    except subprocess.TimeoutExpired:
+        return False, "scan timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def run_trickplay_scan():
+    try:
+        result = subprocess.run(
+            ["python3", "/app/trickplay-scan.py"],
+            capture_output=True, text=True, timeout=300,
+        )
+        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
+    except subprocess.TimeoutExpired:
+        return False, "scan timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def run_cleanup_scan():
+    try:
+        result = subprocess.run(
+            ["python3", "/app/cleanup-scan.py"],
+            capture_output=True, text=True, timeout=300,
         )
         return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
     except subprocess.TimeoutExpired:
@@ -594,6 +1087,15 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/scan":
             ok, msg = run_scan()
             self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path == "/api/scan-dedup":
+            ok, msg = run_dedup_scan()
+            self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path == "/api/scan-trickplay":
+            ok, msg = run_trickplay_scan()
+            self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path == "/api/scan-cleanup":
+            ok, msg = run_cleanup_scan()
+            self._json_response({"ok": ok, "error": msg if not ok else None})
         elif self.path == "/api/settings":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
@@ -619,6 +1121,48 @@ class Handler(BaseHTTPRequestHandler):
             ignored.discard(tmdb_id)
             save_json(IGNORED_FILE, sorted(ignored))
             self._json_response({"ok": True})
+        elif self.path.startswith("/api/ignore-show/"):
+            tvdb_id = int(self.path.split("/")[-1])
+            ignored = set(load_json(IGNORED_SHOWS_FILE, []))
+            ignored.add(tvdb_id)
+            save_json(IGNORED_SHOWS_FILE, sorted(ignored))
+            self._json_response({"ok": True})
+        elif self.path.startswith("/api/unignore-show/"):
+            tvdb_id = int(self.path.split("/")[-1])
+            ignored = set(load_json(IGNORED_SHOWS_FILE, []))
+            ignored.discard(tvdb_id)
+            save_json(IGNORED_SHOWS_FILE, sorted(ignored))
+            self._json_response({"ok": True})
+        elif self.path.startswith("/api/delete-path/"):
+            phash = self.path.split("/")[-1]
+            ok, msg = delete_path(phash)
+            self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path.startswith("/api/delete-category/"):
+            category = self.path.split("/")[-1]
+            cleanup = load_json(CLEANUP_FILE, {})
+            items = [i for i in cleanup.get("items", []) if i.get("category") == category]
+            if not items:
+                self._json_response({"ok": False, "error": "No items in category"})
+                return
+            deleted = 0
+            errors = []
+            for item in items:
+                ph = path_hash(item.get("path", ""))
+                ok, msg = delete_path(ph)
+                if ok:
+                    deleted += 1
+                elif "no longer exists" not in msg:
+                    errors.append(msg)
+            self._json_response({"ok": True, "deleted": deleted, "errors": errors[:5]})
+        elif self.path == "/api/ignore-dedup":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            key = body.get("key", "")
+            if key:
+                ignored = set(load_json(DEDUP_IGNORE_FILE, []))
+                ignored.add(key)
+                save_json(DEDUP_IGNORE_FILE, sorted(ignored))
+            self._json_response({"ok": True})
         else:
             self.send_response(404)
             self.end_headers()
@@ -641,7 +1185,6 @@ class Handler(BaseHTTPRequestHandler):
         active_movies = [m for m in movies if m.get("tmdb_id") not in ignored_ids]
         ignored_movies = [m for m in movies if m.get("tmdb_id") in ignored_ids]
         active_gb = sum(m["size_gb"] for m in active_movies)
-        shows_gb = sum(s["size_gb"] for s in shows)
 
         if active_movies:
             rows = "\n".join(build_movie_row(m) for m in active_movies)
@@ -663,8 +1206,13 @@ class Handler(BaseHTTPRequestHandler):
         else:
             ignored_html = ""
 
-        if shows:
-            s_rows = "\n".join(build_show_row(s) for s in shows)
+        ignored_show_ids = set(load_json(IGNORED_SHOWS_FILE, []))
+        active_shows = [s for s in shows if s.get("tvdb_id") not in ignored_show_ids]
+        ignored_shows = [s for s in shows if s.get("tvdb_id") in ignored_show_ids]
+        shows_gb = sum(s["size_gb"] for s in active_shows)
+
+        if active_shows:
+            s_rows = "\n".join(build_show_row(s) for s in active_shows)
             shows_table = (
                 "<table><thead><tr><th>Show</th><th>Progress</th><th>Size</th><th>Actions</th></tr></thead>"
                 f"<tbody>{s_rows}</tbody></table>"
@@ -672,17 +1220,32 @@ class Handler(BaseHTTPRequestHandler):
         else:
             shows_table = '<div class="empty">No watched shows on disk. Enable Simkl + Sonarr to track shows.</div>'
 
+        if ignored_shows:
+            ig_s_rows = "\n".join(build_show_row(s, ignored=True) for s in ignored_shows)
+            ignored_shows_html = (
+                '<div class="ignored-section">'
+                f'<h2>Ignored ({len(ignored_shows)} shows, {sum(s["size_gb"] for s in ignored_shows):.0f} GB)</h2>'
+                "<table><thead><tr><th>Show</th><th>Progress</th><th>Size</th><th>Actions</th></tr></thead>"
+                f"<tbody>{ig_s_rows}</tbody></table></div>"
+            )
+        else:
+            ignored_shows_html = ""
+
         page = PAGE_TEMPLATE.substitute(
             last_run=html.escape(status.get("last_run", "never")),
             movies_count=len(active_movies),
             movies_gb=round(active_gb),
-            shows_count=len(shows),
+            shows_count=len(active_shows),
             shows_gb=round(shows_gb),
             new_count=status.get("new_since_last", 0),
             trimmed_gb=trimmed.get("gb", 0),
             movies_table=movies_table,
             ignored_section=ignored_html,
             shows_table=shows_table,
+            ignored_shows_section=ignored_shows_html,
+            duplicates_html=build_duplicates_html(),
+            trickplay_html=build_trickplay_html(),
+            cleanup_html=build_cleanup_html(),
             settings_html=build_settings_html(),
         )
         self.send_response(200)

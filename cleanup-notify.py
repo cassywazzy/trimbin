@@ -68,6 +68,8 @@ STATUS_FILE     = DATA_DIR / "cleanup_status.json"
 WATCHED_LIST_FILE = DATA_DIR / "cleanup_watched_list.json"
 SHOWS_LIST_FILE = DATA_DIR / "trimbin_shows.json"
 DISCORD_MSG_FILE = DATA_DIR / "cleanup_discord_msg.json"
+IGNORED_FILE    = DATA_DIR / "trimbin_ignored.json"
+IGNORED_SHOWS_FILE = DATA_DIR / "trimbin_ignored_shows.json"
 
 
 def load_json(path, default):
@@ -234,6 +236,8 @@ def _parse_simkl_movies(data):
 def _parse_simkl_shows(data, item_type="shows"):
     shows = {}
     for item in data.get(item_type, []):
+        if item.get("status") not in ("completed", None):
+            continue
         show_obj = item.get("show", item.get("anime", {}))
         ids = show_obj.get("ids", {})
         tvdb = ids.get("tvdb")
@@ -245,6 +249,8 @@ def _parse_simkl_shows(data, item_type="shows"):
             snum = season["number"]
             watched_eps[snum] = len(season.get("episodes", []))
         total = sum(watched_eps.values())
+        if total == 0:
+            total = item.get("watched_episodes_count", 0) or 0
         if tvdb in shows and shows[tvdb]["total_watched_eps"] >= total:
             continue
         shows[tvdb] = {
@@ -272,10 +278,10 @@ def fetch_simkl_movies():
         data = simkl_get("/sync/all-items/movies/completed")
         movies = _parse_simkl_movies(data or {})
         time.sleep(1)
-        data = simkl_get("/sync/all-items/shows/?extended=full")
+        data = simkl_get("/sync/all-items/shows/completed?extended=full")
         shows = _parse_simkl_shows(data or {}, "shows")
         time.sleep(1)
-        data = simkl_get("/sync/all-items/anime/?extended=full")
+        data = simkl_get("/sync/all-items/anime/completed?extended=full")
         anime_shows = _parse_simkl_shows(data or {}, "anime")
         shows.update(anime_shows)
 
@@ -491,7 +497,7 @@ def get_radarr_library():
             movies[m["tmdbId"]] = {
                 "title": m["title"],
                 "year": m.get("year", ""),
-                "size_gb": round(m["sizeOnDisk"] / (1024 ** 3), 1),
+                "size_gb": max(0.1, round(m["sizeOnDisk"] / (1024 ** 3), 1)),
                 "radarr_id": m["id"],
             }
     return movies
@@ -594,6 +600,16 @@ def main():
             })
     watched_on_disk.sort(key=lambda x: x["size_gb"], reverse=True)
 
+    # Preserve ignored movies — they may no longer be in Radarr or watch sources
+    # but must stay in the list so the UI can render them in the ignored section
+    ignored_ids = set(load_json(IGNORED_FILE, []))
+    active_tmdb_ids = {m["tmdb_id"] for m in watched_on_disk}
+    if ignored_ids - active_tmdb_ids:
+        prev_list = load_json(WATCHED_LIST_FILE, [])
+        for m in prev_list:
+            if m.get("tmdb_id") in ignored_ids and m["tmdb_id"] not in active_tmdb_ids:
+                watched_on_disk.append(m)
+
     total_count = len(watched_on_disk)
     total_gb = sum(m["size_gb"] for m in watched_on_disk)
     new_watches = [m for m in watched_on_disk if m["new"]]
@@ -611,8 +627,10 @@ def main():
         if tvdb_id in sonarr:
             show = sonarr[tvdb_id]
             watched_eps = simkl_info["total_watched_eps"]
-            total_eps = show["episode_file_count"]
+            total_eps = show["episode_count"]
             pct = round(100 * watched_eps / total_eps) if total_eps > 0 else 0
+            if pct < 75:
+                continue
             shows_on_disk.append({
                 "tvdb_id": tvdb_id,
                 "title": show["title"],
@@ -626,6 +644,15 @@ def main():
                 "watched_seasons": simkl_info["watched_seasons"],
             })
     shows_on_disk.sort(key=lambda x: x["size_gb"], reverse=True)
+
+    # Preserve ignored shows
+    ignored_show_ids = set(load_json(IGNORED_SHOWS_FILE, []))
+    active_tvdb_ids = {s["tvdb_id"] for s in shows_on_disk}
+    if ignored_show_ids - active_tvdb_ids:
+        prev_shows = load_json(SHOWS_LIST_FILE, [])
+        for s in prev_shows:
+            if s.get("tvdb_id") in ignored_show_ids and s["tvdb_id"] not in active_tvdb_ids:
+                shows_on_disk.append(s)
 
     shows_count = len(shows_on_disk)
     shows_gb = sum(s["size_gb"] for s in shows_on_disk)
