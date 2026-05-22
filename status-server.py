@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import threading
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -28,6 +29,9 @@ CONFIG_KEYS = [
     ("RADARR_API_KEY", "Radarr API key", "radarr"),
     ("SONARR_URL", "Sonarr URL", "sonarr"),
     ("SONARR_API_KEY", "Sonarr API key", "sonarr"),
+    ("QBIT_URL", "qBittorrent URL (e.g. http://qbittorrent-host:8080)", "qbittorrent"),
+    ("QBIT_USERNAME", "qBittorrent username", "qbittorrent"),
+    ("QBIT_PASSWORD", "qBittorrent password", "qbittorrent"),
     ("SIMKL_CLIENT_ID", "Simkl client ID", "simkl"),
     ("SIMKL_ACCESS_TOKEN", "Simkl access token", "simkl"),
     ("JELLYSTAT_URL", "Jellystat URL", "jellystat"),
@@ -42,7 +46,7 @@ CONFIG_KEYS = [
 
 SENSITIVE_KEYS = {"RADARR_API_KEY", "SONARR_API_KEY", "SIMKL_CLIENT_ID",
                   "SIMKL_ACCESS_TOKEN", "JELLYSTAT_API_KEY", "JELLYFIN_API_KEY",
-                  "DISCORD_WEBHOOK_URL", "HC_PING_URL"}
+                  "DISCORD_WEBHOOK_URL", "HC_PING_URL", "QBIT_PASSWORD"}
 
 
 def load_json(path, default):
@@ -554,14 +558,15 @@ def build_settings_html():
         "letterboxd": "Letterboxd",
         "radarr": "Radarr",
         "sonarr": "Sonarr",
+        "qbittorrent": "qBittorrent",
         "simkl": "Simkl",
         "jellystat": "Jellystat / Jellyfin",
         "notifications": "Notifications",
-    "scans": "Storage Scans",
+        "scans": "Storage Scans",
     }
 
     parts = ['<form id="settingsForm" class="settings-form" onsubmit="event.preventDefault();saveSettings()">']
-    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications", "scans"]:
+    for group_key in ["letterboxd", "radarr", "sonarr", "qbittorrent", "simkl", "jellystat", "notifications", "scans"]:
         if group_key not in groups:
             continue
         parts.append(f'<div class="settings-group"><h3>{group_titles.get(group_key, group_key)}</h3>')
@@ -906,6 +911,90 @@ def arr_api(base_url, api_key, method, path, body=None):
     return None
 
 
+def qbit_login():
+    """Log into qBittorrent and return the session cookie, or None."""
+    qbit_url = get_config("QBIT_URL")
+    if not qbit_url:
+        return None, None
+    qbit_url = qbit_url.rstrip("/")
+    username = get_config("QBIT_USERNAME") or "admin"
+    password = get_config("QBIT_PASSWORD") or ""
+    try:
+        login_data = f"username={urllib.parse.quote(username)}&password={urllib.parse.quote(password)}".encode()
+        req = urllib.request.Request(f"{qbit_url}/api/v2/auth/login", data=login_data, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        resp = urllib.request.urlopen(req, timeout=10)
+        cookie = resp.headers.get("Set-Cookie", "")
+        sid = ""
+        for part in cookie.split(";"):
+            if part.strip().startswith("SID="):
+                sid = part.strip()
+                break
+        return qbit_url, sid
+    except Exception:
+        return qbit_url, None
+
+
+def qbit_delete_hashes(hashes):
+    """Delete torrents from qBit by hash list (torrent entry only, not files)."""
+    if not hashes:
+        return
+    qbit_url, sid = qbit_login()
+    if not qbit_url or not sid:
+        return
+    try:
+        h = "|".join(hashes)
+        del_data = f"hashes={h}&deleteFiles=false".encode()
+        req = urllib.request.Request(f"{qbit_url}/api/v2/torrents/delete", data=del_data, method="POST")
+        req.add_header("Cookie", sid)
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+
+def purge_qbit_for_arr(arr_url, arr_key, history_query):
+    """Look up download hashes from arr history and remove them from qBit."""
+    qbit_url = get_config("QBIT_URL")
+    if not qbit_url:
+        return
+    try:
+        result = arr_api(arr_url, arr_key, "GET",
+                         f"/history?{history_query}&pageSize=50")
+        if not result:
+            return
+        items = result.get("records", []) if isinstance(result, dict) else result
+        hashes = set()
+        for r in items:
+            dl_id = r.get("downloadId", "")
+            if dl_id and len(dl_id) == 40:
+                hashes.add(dl_id.lower())
+        qbit_delete_hashes(hashes)
+    except Exception:
+        pass
+
+
+def purge_qbit_by_path(content_path):
+    """Find and delete qBit torrent(s) whose content_path matches."""
+    qbit_url, sid = qbit_login()
+    if not qbit_url or not sid:
+        return
+    try:
+        req = urllib.request.Request(f"{qbit_url}/api/v2/torrents/info")
+        req.add_header("Cookie", sid)
+        resp = urllib.request.urlopen(req, timeout=15)
+        torrents = json.loads(resp.read())
+    except Exception:
+        return
+    norm = os.path.normpath(content_path)
+    to_delete = []
+    for t in torrents:
+        t_path = os.path.normpath(t.get("content_path", ""))
+        if t_path == norm or norm.startswith(t_path + os.sep) or t_path.startswith(norm + os.sep):
+            to_delete.append(t["hash"])
+    qbit_delete_hashes(to_delete)
+
+
 def trim_movie(tmdb_id):
     radarr_url = get_radarr_url()
     radarr_key = get_config("RADARR_API_KEY")
@@ -920,6 +1009,8 @@ def trim_movie(tmdb_id):
 
     title = target.get("title", "Unknown")
     size_gb = round(target.get("sizeOnDisk", 0) / (1024**3), 1)
+    purge_qbit_for_arr(radarr_url, radarr_key,
+                       f"movieIds={target['id']}")
     arr_api(radarr_url, radarr_key, "DELETE",
             f"/movie/{target['id']}?deleteFiles=true&addImportExclusion=false")
 
@@ -950,6 +1041,8 @@ def trim_show(sonarr_id):
 
     title = target.get("title", "Unknown")
     size_gb = round(target.get("statistics", {}).get("sizeOnDisk", 0) / (1024**3), 1)
+    purge_qbit_for_arr(sonarr_url, sonarr_key,
+                       f"seriesId={target['id']}")
     arr_api(sonarr_url, sonarr_key, "DELETE",
             f"/series/{target['id']}?deleteFiles=true&addImportExclusion=false")
 
@@ -993,6 +1086,7 @@ def delete_path(phash):
     if not any(target_path.startswith(p) for p in
                [p.strip() for p in get_config("MEDIA_LIBRARIES").split(",") if p.strip()]):
         return False, "Path is not under a configured media library"
+    purge_qbit_by_path(target_path)
     try:
         if os.path.isdir(target_path):
             shutil.rmtree(target_path)

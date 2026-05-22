@@ -11,7 +11,7 @@ Media cleanup tool for the *arr ecosystem. Monitors your watched lists across mu
 - **Multi-source watch detection** — merges watched lists from Letterboxd, Simkl, and Jellystat
 - **Movie + show support** — cross-references Radarr (movies) and Sonarr (shows)
 - **Multi-user watch counts** — Jellystat integration shows "3/4 users watched" badges
-- **One-click trim** — delete files and unmonitor in Radarr/Sonarr from the web UI (with confirmation dialog)
+- **One-click trim** — delete files, unmonitor in Radarr/Sonarr, and purge the qBittorrent listing from the web UI (with confirmation dialog)
 - **Ignore list** — push movies to a greyed-out secondary list; restore them anytime
 - **Tabbed UI** — separate Movies and Shows tabs with progress bars for episode completion
 - **Discord digest** — weekly notification of newly watched media still on disk
@@ -53,8 +53,8 @@ The status server provides a dark-themed dashboard at port 5380:
 | GET | `/` | Web UI |
 | GET | `/api/status` | JSON status for dashboard widgets |
 | GET | `/ping` | Health check |
-| POST | `/api/trim/<tmdb_id>` | Delete movie files + remove from Radarr |
-| POST | `/api/trim-show/<sonarr_id>` | Delete show files + remove from Sonarr |
+| POST | `/api/trim/<tmdb_id>` | Delete movie files + remove from Radarr + purge qBit torrent |
+| POST | `/api/trim-show/<sonarr_id>` | Delete show files + remove from Sonarr + purge qBit torrent |
 | POST | `/api/ignore/<tmdb_id>` | Add movie to ignore list |
 | POST | `/api/unignore/<tmdb_id>` | Remove movie from ignore list |
 | GET/POST | `/api/settings` | View/save integration settings |
@@ -108,6 +108,16 @@ python cleanup-notify.py     # Run a scan
 |----------|-------------|
 | `SIMKL_CLIENT_ID` | Simkl API client ID ([create app](https://simkl.com/settings/developer/new/)) |
 | `SIMKL_ACCESS_TOKEN` | OAuth access token (use PIN auth flow, token never expires) |
+
+### qBittorrent integration
+
+| Variable | Description |
+|----------|-------------|
+| `QBIT_URL` | qBittorrent Web UI URL (e.g. `http://qbittorrent:8080`) |
+| `QBIT_USERNAME` | qBittorrent username (default: `admin`) |
+| `QBIT_PASSWORD` | qBittorrent password |
+
+When configured, trimming a movie/show also removes the associated torrent(s) from qBittorrent (torrent entry only — files are already deleted by Radarr/Sonarr). If you run multiple qBit instances, point this at your main one (not a dedicated seeding instance).
 
 ### Sonarr integration
 
