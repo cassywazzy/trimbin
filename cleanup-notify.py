@@ -70,6 +70,7 @@ SHOWS_LIST_FILE = DATA_DIR / "trimbin_shows.json"
 DISCORD_MSG_FILE = DATA_DIR / "cleanup_discord_msg.json"
 IGNORED_FILE    = DATA_DIR / "trimbin_ignored.json"
 IGNORED_SHOWS_FILE = DATA_DIR / "trimbin_ignored_shows.json"
+AUTO_IGNORED_FILE = DATA_DIR / "trimbin_auto_ignored.json"
 
 
 def load_json(path, default):
@@ -122,42 +123,101 @@ def ping_hc(suffix=""):
 # ---------------------------------------------------------------------------
 
 def scrape_letterboxd_movies():
+    """Scrape watched films and ratings from Letterboxd profile.
+
+    Returns (watched, ratings) where:
+      watched: {tmdb_id: slug}
+      ratings: {tmdb_id: float} for films with user ratings (0.5-5.0)
+    """
     if not LB_USER:
         log.info("LETTERBOXD_USER not set, skipping Letterboxd")
-        return {}
-    slugs, seen = [], set()
+        return {}, {}
+    slugs = []
+    seen = set()
+    slug_to_rating = {}
     base_url = f"https://letterboxd.com/{LB_USER}/films/"
     page = 1
     while True:
         url = f"{base_url}page/{page}/"
         try:
-            html = http_get(url, referer=base_url)
+            html_text = http_get(url, referer=base_url)
         except urllib.error.HTTPError as e:
             if e.code in (404, 403):
                 break
             raise
-        page_slugs = re.findall(r'data-film-slug="([^"]+)"', html)
+        page_slugs = []
+        for m in re.finditer(r'<[^>]+data-film-slug="([^"]+)"[^>]*>', html_text):
+            slug = m.group(1)
+            if slug not in seen:
+                page_slugs.append(slug)
+                seen.add(slug)
+                rm = re.search(r'data-owner-rating="(\d+)"', m.group(0))
+                if rm:
+                    slug_to_rating[slug] = int(rm.group(1)) / 2.0
         if not page_slugs:
-            page_slugs = re.findall(r'data-target-link="/film/([^"/]+)/"', html)
-        new = [s for s in page_slugs if s not in seen]
-        if not new:
+            alt = re.findall(r'data-target-link="/film/([^"/]+)/"', html_text)
+            page_slugs = [s for s in alt if s not in seen]
+            for s in page_slugs:
+                seen.add(s)
+        if not page_slugs:
             break
-        for s in new:
-            slugs.append(s)
-            seen.add(s)
-        log.info("letterboxd page %d: %d films (total %d)", page, len(new), len(slugs))
+        slugs.extend(page_slugs)
+        log.info("letterboxd page %d: %d films (total %d)", page, len(page_slugs), len(slugs))
         page += 1
         time.sleep(2)
 
     slug_cache = load_json(SLUG_CACHE, {})
     watched = {}
+    ratings = {}
     for slug in slugs:
         tmdb = _resolve_slug(slug, slug_cache)
         if tmdb is not None:
             watched[tmdb] = slug
+            if slug in slug_to_rating:
+                ratings[tmdb] = slug_to_rating[slug]
     save_json(SLUG_CACHE, slug_cache)
-    log.info("letterboxd: %d/%d resolved to TMDB IDs", len(watched), len(slugs))
-    return watched
+    log.info("letterboxd: %d/%d resolved to TMDB IDs, %d have ratings",
+             len(watched), len(slugs), len(ratings))
+    return watched, ratings
+
+
+def scrape_letterboxd_likes():
+    """Scrape liked/favorited films from Letterboxd profile."""
+    if not LB_USER:
+        return set()
+    liked_slugs = set()
+    base_url = f"https://letterboxd.com/{LB_USER}/likes/films/"
+    page = 1
+    while True:
+        url = f"{base_url}page/{page}/"
+        try:
+            html_text = http_get(url, referer=base_url)
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 403):
+                break
+            raise
+        page_slugs = re.findall(r'data-film-slug="([^"]+)"', html_text)
+        if not page_slugs:
+            page_slugs = re.findall(r'data-target-link="/film/([^"/]+)/"', html_text)
+        new = [s for s in page_slugs if s not in liked_slugs]
+        if not new:
+            break
+        liked_slugs.update(new)
+        log.info("letterboxd likes page %d: %d films (total %d)",
+                 page, len(new), len(liked_slugs))
+        page += 1
+        time.sleep(2)
+
+    slug_cache = load_json(SLUG_CACHE, {})
+    liked_tmdb = set()
+    for slug in liked_slugs:
+        tmdb = _resolve_slug(slug, slug_cache)
+        if tmdb is not None:
+            liked_tmdb.add(tmdb)
+    save_json(SLUG_CACHE, slug_cache)
+    log.info("letterboxd likes: %d/%d resolved to TMDB IDs",
+             len(liked_tmdb), len(liked_slugs))
+    return liked_tmdb
 
 
 def _resolve_slug(slug, cache):
@@ -548,8 +608,21 @@ def post_discord(content):
 def main():
     ping_hc("start")
 
+    # Read auto-ignore settings early so we only scrape likes if needed
+    auto_ignore_liked = _cfg("LB_AUTO_IGNORE_LIKED").lower() in ("true", "1", "yes", "on")
+    min_rating_str = _cfg("LB_MIN_RATING_IGNORE")
+    min_rating = None
+    if min_rating_str:
+        try:
+            min_rating = float(min_rating_str)
+            if not (0.5 <= min_rating <= 5.0):
+                min_rating = None
+        except ValueError:
+            min_rating = None
+
     # ---- Movies ----
-    lb_watched = scrape_letterboxd_movies()
+    lb_watched, lb_ratings = scrape_letterboxd_movies()
+    lb_likes = scrape_letterboxd_likes() if auto_ignore_liked else set()
     simkl_watched = fetch_simkl_movies()
 
     all_watched_tmdb = set(lb_watched.keys()) | set(simkl_watched.keys())
@@ -599,6 +672,33 @@ def main():
                 "watched_by": watched_by,
             })
     watched_on_disk.sort(key=lambda x: x["size_gb"], reverse=True)
+
+    # ---- Auto-ignore liked/highly-rated films ----
+    if auto_ignore_liked or min_rating is not None:
+        existing_ignored = set(load_json(IGNORED_FILE, []))
+        auto_ignored = load_json(AUTO_IGNORED_FILE, {})
+        auto_count = 0
+        for m in watched_on_disk:
+            tmdb = m["tmdb_id"]
+            if tmdb in existing_ignored:
+                continue
+            prev = auto_ignored.get(str(tmdb))
+            if prev and prev.get("restored"):
+                continue
+            reason = None
+            if auto_ignore_liked and tmdb in lb_likes:
+                reason = "liked"
+            if min_rating is not None and tmdb in lb_ratings and lb_ratings[tmdb] >= min_rating:
+                reason = f"rated {lb_ratings[tmdb]:g}"
+            if reason:
+                existing_ignored.add(tmdb)
+                auto_ignored[str(tmdb)] = {"reason": reason}
+                auto_count += 1
+                log.info("auto-ignored: %s (%s)", m["title"], reason)
+        if auto_count:
+            save_json(IGNORED_FILE, sorted(existing_ignored))
+            save_json(AUTO_IGNORED_FILE, auto_ignored)
+            log.info("auto-ignored %d movies this scan", auto_count)
 
     # Preserve ignored movies — they may no longer be in Radarr or watch sources
     # but must stay in the list so the UI can render them in the ignored section

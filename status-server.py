@@ -7,7 +7,6 @@ import os
 import shutil
 import subprocess
 import threading
-import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -20,6 +19,7 @@ STATUS_FILE = DATA_DIR / "cleanup_status.json"
 WATCHED_LIST_FILE = DATA_DIR / "cleanup_watched_list.json"
 SHOWS_LIST_FILE = DATA_DIR / "trimbin_shows.json"
 IGNORED_FILE = DATA_DIR / "trimbin_ignored.json"
+AUTO_IGNORED_FILE = DATA_DIR / "trimbin_auto_ignored.json"
 CONFIG_FILE = DATA_DIR / "trimbin_config.json"
 PORT = int(os.environ.get("PORT", "5380"))
 
@@ -29,9 +29,6 @@ CONFIG_KEYS = [
     ("RADARR_API_KEY", "Radarr API key", "radarr"),
     ("SONARR_URL", "Sonarr URL", "sonarr"),
     ("SONARR_API_KEY", "Sonarr API key", "sonarr"),
-    ("QBIT_URL", "qBittorrent URL (e.g. http://qbittorrent-host:8080)", "qbittorrent"),
-    ("QBIT_USERNAME", "qBittorrent username", "qbittorrent"),
-    ("QBIT_PASSWORD", "qBittorrent password", "qbittorrent"),
     ("SIMKL_CLIENT_ID", "Simkl client ID", "simkl"),
     ("SIMKL_ACCESS_TOKEN", "Simkl access token", "simkl"),
     ("JELLYSTAT_URL", "Jellystat URL", "jellystat"),
@@ -42,11 +39,15 @@ CONFIG_KEYS = [
     ("HC_PING_URL", "Healthchecks ping URL", "notifications"),
     ("DIGEST_TIME", "Daily trim digest time (HH:MM, 24h)", "notifications"),
     ("MEDIA_LIBRARIES", "Media library paths (comma-separated)", "scans"),
+    ("LB_AUTO_IGNORE_LIKED", "Auto-ignore liked films on Letterboxd", "auto_ignore"),
+    ("LB_MIN_RATING_IGNORE", "Auto-ignore films rated at or above", "auto_ignore"),
 ]
+
+SELECT_KEYS = {"LB_AUTO_IGNORE_LIKED", "LB_MIN_RATING_IGNORE"}
 
 SENSITIVE_KEYS = {"RADARR_API_KEY", "SONARR_API_KEY", "SIMKL_CLIENT_ID",
                   "SIMKL_ACCESS_TOKEN", "JELLYSTAT_API_KEY", "JELLYFIN_API_KEY",
-                  "DISCORD_WEBHOOK_URL", "HC_PING_URL", "QBIT_PASSWORD"}
+                  "DISCORD_WEBHOOK_URL", "HC_PING_URL"}
 
 
 def load_json(path, default):
@@ -167,6 +168,8 @@ tr:hover{background:#1e2d4a}
 .badge.new{background:#f39c12;color:#1a1a2e}
 .badge.src{background:#0f3460;color:#888;font-weight:400}
 .badge.watched{background:#00d474;color:#1a1a2e}
+.badge.auto-liked{background:#e94560;color:#fff}
+.badge.auto-rated{background:#f39c12;color:#1a1a2e}
 .pct-bar{display:inline-block;width:60px;height:8px;background:#0f3460;border-radius:4px;overflow:hidden;vertical-align:middle;margin-right:6px}
 .pct-fill{height:100%;border-radius:4px}
 .pct-100 .pct-fill{background:#00d474}
@@ -394,9 +397,9 @@ function doRestoreShow(tvdbId) {
 function saveSettings() {
   var form = document.getElementById('settingsForm');
   var data = {};
-  form.querySelectorAll('input[data-key]').forEach(function(input) {
-    var val = input.value.trim();
-    if (val) data[input.dataset.key] = val;
+  form.querySelectorAll('input[data-key], select[data-key]').forEach(function(el) {
+    var val = el.value.trim();
+    if (val) data[el.dataset.key] = val;
   });
   fetch('/api/settings', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)})
     .then(r => r.json())
@@ -470,6 +473,12 @@ def slug_from_title(title, year):
     return "-".join(s.split())
 
 
+def _auto_ignored_cache():
+    if not hasattr(_auto_ignored_cache, "_data"):
+        _auto_ignored_cache._data = load_json(AUTO_IGNORED_FILE, {})
+    return _auto_ignored_cache._data
+
+
 def build_movie_row(m, ignored=False):
     radarr_url = get_radarr_url()
     badge_new = '<span class="badge new">NEW</span>' if m.get("new") and not ignored else ""
@@ -481,12 +490,21 @@ def build_movie_row(m, ignored=False):
     if wc > 0:
         badge_watch = f'<span class="badge watched">{wc}/{tu} watched</span>' if tu > 0 else f'<span class="badge watched">{wc} watched</span>'
 
+    tmdb = m.get("tmdb_id", "")
+    badge_auto = ""
+    if ignored:
+        auto_info = _auto_ignored_cache().get(str(tmdb), {})
+        reason = auto_info.get("reason", "")
+        if reason == "liked":
+            badge_auto = '<span class="badge auto-liked">liked</span>'
+        elif reason.startswith("rated"):
+            badge_auto = f'<span class="badge auto-rated">{html.escape(reason)}</span>'
+
     slug = slug_from_title(m["title"], m.get("year", ""))
     title = html.escape(m["title"])
     year = m.get("year", "?")
     size = m["size_gb"]
     rid = m.get("radarr_id", "")
-    tmdb = m.get("tmdb_id", "")
     title_js = html.escape(m["title"].replace("'", "\\'").replace('"', '\\"'))
 
     if ignored:
@@ -502,7 +520,7 @@ def build_movie_row(m, ignored=False):
     return (
         f'<tr><td><a class="movie-link" href="https://letterboxd.com/film/{slug}/" '
         f'target="_blank">{title}</a> <span class="year">({year})</span>'
-        f'{badge_new}{badge_src}{badge_watch}</td>'
+        f'{badge_new}{badge_src}{badge_watch}{badge_auto}</td>'
         f'<td class="size">{size} GB</td>'
         f'<td class="actions">{actions}</td></tr>'
     )
@@ -558,15 +576,15 @@ def build_settings_html():
         "letterboxd": "Letterboxd",
         "radarr": "Radarr",
         "sonarr": "Sonarr",
-        "qbittorrent": "qBittorrent",
         "simkl": "Simkl",
         "jellystat": "Jellystat / Jellyfin",
         "notifications": "Notifications",
         "scans": "Storage Scans",
+        "auto_ignore": "Auto-Ignore",
     }
 
     parts = ['<form id="settingsForm" class="settings-form" onsubmit="event.preventDefault();saveSettings()">']
-    for group_key in ["letterboxd", "radarr", "sonarr", "qbittorrent", "simkl", "jellystat", "notifications", "scans"]:
+    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications", "scans", "auto_ignore"]:
         if group_key not in groups:
             continue
         parts.append(f'<div class="settings-group"><h3>{group_titles.get(group_key, group_key)}</h3>')
@@ -575,17 +593,51 @@ def build_settings_html():
             env_val = os.environ.get(key, "")
             has_value = bool(val or env_val)
             dot_class = "set" if has_value else "unset"
-            is_sensitive = key in SENSITIVE_KEYS
-            input_type = "password" if is_sensitive else "text"
-            display_val = html.escape(val) if val else ""
-            placeholder = "(from environment)" if env_val and not val else ""
-            parts.append(
-                f'<div class="field">'
-                f'<span class="status-dot {dot_class}"></span>'
-                f'<label>{html.escape(label)}</label>'
-                f'<input type="{input_type}" data-key="{key}" value="{display_val}" placeholder="{placeholder}">'
-                f'</div>'
-            )
+
+            if key == "LB_AUTO_IGNORE_LIKED":
+                sel_on = ' selected' if val == "true" else ''
+                sel_off = ' selected' if val == "false" else ''
+                sel_none = ' selected' if not val else ''
+                parts.append(
+                    f'<div class="field">'
+                    f'<span class="status-dot {dot_class}"></span>'
+                    f'<label>{html.escape(label)}</label>'
+                    f'<select data-key="{key}" style="flex:1;background:#0f3460;border:1px solid #1e2d4a;'
+                    f'border-radius:4px;padding:8px 12px;color:#e0e0e0;font-size:.85em">'
+                    f'<option value=""{sel_none}>Disabled</option>'
+                    f'<option value="true"{sel_on}>Enabled</option>'
+                    f'<option value="false"{sel_off}>Disabled</option>'
+                    f'</select></div>'
+                )
+            elif key == "LB_MIN_RATING_IGNORE":
+                opts = ['<option value="">Disabled</option>']
+                for r in [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5]:
+                    rs = f"{r:g}"
+                    sel = ' selected' if val == rs else ''
+                    stars = int(r) * 2
+                    half = r != int(r)
+                    opts.append(f'<option value="{rs}"{sel}>{rs} stars</option>')
+                parts.append(
+                    f'<div class="field">'
+                    f'<span class="status-dot {dot_class}"></span>'
+                    f'<label>{html.escape(label)}</label>'
+                    f'<select data-key="{key}" style="flex:1;background:#0f3460;border:1px solid #1e2d4a;'
+                    f'border-radius:4px;padding:8px 12px;color:#e0e0e0;font-size:.85em">'
+                    f'{"".join(opts)}'
+                    f'</select></div>'
+                )
+            else:
+                is_sensitive = key in SENSITIVE_KEYS
+                input_type = "password" if is_sensitive else "text"
+                display_val = html.escape(val) if val else ""
+                placeholder = "(from environment)" if env_val and not val else ""
+                parts.append(
+                    f'<div class="field">'
+                    f'<span class="status-dot {dot_class}"></span>'
+                    f'<label>{html.escape(label)}</label>'
+                    f'<input type="{input_type}" data-key="{key}" value="{display_val}" placeholder="{placeholder}">'
+                    f'</div>'
+                )
         parts.append('</div>')
     parts.append('<button type="submit" class="save-btn">Save settings</button>')
     parts.append('<p class="settings-note">Settings are saved to the data directory. Environment variables are used as fallback when a field is empty.</p>')
@@ -911,90 +963,6 @@ def arr_api(base_url, api_key, method, path, body=None):
     return None
 
 
-def qbit_login():
-    """Log into qBittorrent and return the session cookie, or None."""
-    qbit_url = get_config("QBIT_URL")
-    if not qbit_url:
-        return None, None
-    qbit_url = qbit_url.rstrip("/")
-    username = get_config("QBIT_USERNAME") or "admin"
-    password = get_config("QBIT_PASSWORD") or ""
-    try:
-        login_data = f"username={urllib.parse.quote(username)}&password={urllib.parse.quote(password)}".encode()
-        req = urllib.request.Request(f"{qbit_url}/api/v2/auth/login", data=login_data, method="POST")
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-        resp = urllib.request.urlopen(req, timeout=10)
-        cookie = resp.headers.get("Set-Cookie", "")
-        sid = ""
-        for part in cookie.split(";"):
-            if part.strip().startswith("SID="):
-                sid = part.strip()
-                break
-        return qbit_url, sid
-    except Exception:
-        return qbit_url, None
-
-
-def qbit_delete_hashes(hashes):
-    """Delete torrents from qBit by hash list (torrent entry only, not files)."""
-    if not hashes:
-        return
-    qbit_url, sid = qbit_login()
-    if not qbit_url or not sid:
-        return
-    try:
-        h = "|".join(hashes)
-        del_data = f"hashes={h}&deleteFiles=false".encode()
-        req = urllib.request.Request(f"{qbit_url}/api/v2/torrents/delete", data=del_data, method="POST")
-        req.add_header("Cookie", sid)
-        req.add_header("Content-Type", "application/x-www-form-urlencoded")
-        urllib.request.urlopen(req, timeout=10)
-    except Exception:
-        pass
-
-
-def purge_qbit_for_arr(arr_url, arr_key, history_query):
-    """Look up download hashes from arr history and remove them from qBit."""
-    qbit_url = get_config("QBIT_URL")
-    if not qbit_url:
-        return
-    try:
-        result = arr_api(arr_url, arr_key, "GET",
-                         f"/history?{history_query}&pageSize=50")
-        if not result:
-            return
-        items = result.get("records", []) if isinstance(result, dict) else result
-        hashes = set()
-        for r in items:
-            dl_id = r.get("downloadId", "")
-            if dl_id and len(dl_id) == 40:
-                hashes.add(dl_id.lower())
-        qbit_delete_hashes(hashes)
-    except Exception:
-        pass
-
-
-def purge_qbit_by_path(content_path):
-    """Find and delete qBit torrent(s) whose content_path matches."""
-    qbit_url, sid = qbit_login()
-    if not qbit_url or not sid:
-        return
-    try:
-        req = urllib.request.Request(f"{qbit_url}/api/v2/torrents/info")
-        req.add_header("Cookie", sid)
-        resp = urllib.request.urlopen(req, timeout=15)
-        torrents = json.loads(resp.read())
-    except Exception:
-        return
-    norm = os.path.normpath(content_path)
-    to_delete = []
-    for t in torrents:
-        t_path = os.path.normpath(t.get("content_path", ""))
-        if t_path == norm or norm.startswith(t_path + os.sep) or t_path.startswith(norm + os.sep):
-            to_delete.append(t["hash"])
-    qbit_delete_hashes(to_delete)
-
-
 def trim_movie(tmdb_id):
     radarr_url = get_radarr_url()
     radarr_key = get_config("RADARR_API_KEY")
@@ -1009,8 +977,6 @@ def trim_movie(tmdb_id):
 
     title = target.get("title", "Unknown")
     size_gb = round(target.get("sizeOnDisk", 0) / (1024**3), 1)
-    purge_qbit_for_arr(radarr_url, radarr_key,
-                       f"movieIds={target['id']}")
     arr_api(radarr_url, radarr_key, "DELETE",
             f"/movie/{target['id']}?deleteFiles=true&addImportExclusion=false")
 
@@ -1041,8 +1007,6 @@ def trim_show(sonarr_id):
 
     title = target.get("title", "Unknown")
     size_gb = round(target.get("statistics", {}).get("sizeOnDisk", 0) / (1024**3), 1)
-    purge_qbit_for_arr(sonarr_url, sonarr_key,
-                       f"seriesId={target['id']}")
     arr_api(sonarr_url, sonarr_key, "DELETE",
             f"/series/{target['id']}?deleteFiles=true&addImportExclusion=false")
 
@@ -1086,7 +1050,6 @@ def delete_path(phash):
     if not any(target_path.startswith(p) for p in
                [p.strip() for p in get_config("MEDIA_LIBRARIES").split(",") if p.strip()]):
         return False, "Path is not under a configured media library"
-    purge_qbit_by_path(target_path)
     try:
         if os.path.isdir(target_path):
             shutil.rmtree(target_path)
@@ -1178,6 +1141,15 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        try:
+            self._route_post()
+        except Exception as e:
+            try:
+                self._json_response({"ok": False, "error": str(e)}, status=500)
+            except Exception:
+                pass
+
+    def _route_post(self):
         if self.path == "/api/scan":
             ok, msg = run_scan()
             self._json_response({"ok": ok, "error": msg if not ok else None})
@@ -1214,6 +1186,12 @@ class Handler(BaseHTTPRequestHandler):
             ignored = set(load_json(IGNORED_FILE, []))
             ignored.discard(tmdb_id)
             save_json(IGNORED_FILE, sorted(ignored))
+            auto_ignored = load_json(AUTO_IGNORED_FILE, {})
+            if str(tmdb_id) in auto_ignored:
+                auto_ignored[str(tmdb_id)]["restored"] = True
+                save_json(AUTO_IGNORED_FILE, auto_ignored)
+            if hasattr(_auto_ignored_cache, "_data"):
+                del _auto_ignored_cache._data
             self._json_response({"ok": True})
         elif self.path.startswith("/api/ignore-show/"):
             tvdb_id = int(self.path.split("/")[-1])
@@ -1268,6 +1246,8 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode())
 
     def _serve_ui(self):
+        if hasattr(_auto_ignored_cache, "_data"):
+            del _auto_ignored_cache._data
         status = load_json(STATUS_FILE, {
             "watched_on_disk": 0, "total_gb": 0, "new_since_last": 0,
             "shows_on_disk": 0, "shows_gb": 0, "last_run": "never"})
