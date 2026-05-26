@@ -7,7 +7,9 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -21,6 +23,8 @@ SHOWS_LIST_FILE = DATA_DIR / "trimbin_shows.json"
 IGNORED_FILE = DATA_DIR / "trimbin_ignored.json"
 AUTO_IGNORED_FILE = DATA_DIR / "trimbin_auto_ignored.json"
 CONFIG_FILE = DATA_DIR / "trimbin_config.json"
+TREE_FILE = DATA_DIR / "tree_scan.json"
+TASTE_FILE = DATA_DIR / "taste_profile.json"
 PORT = int(os.environ.get("PORT", "5380"))
 
 CONFIG_KEYS = [
@@ -41,6 +45,10 @@ CONFIG_KEYS = [
     ("MEDIA_LIBRARIES", "Media library paths (comma-separated)", "scans"),
     ("LB_AUTO_IGNORE_LIKED", "Auto-ignore liked films on Letterboxd", "auto_ignore"),
     ("LB_MIN_RATING_IGNORE", "Auto-ignore films rated at or above", "auto_ignore"),
+    ("OLLAMA_URL", "Ollama server URL (e.g. http://ollama-host:11434)", "ai"),
+    ("OLLAMA_MODEL", "Ollama model name (e.g. llama3.1:8b)", "ai"),
+    ("OLLAMA_TEMPERATURE", "AI temperature (0.0-1.0, lower=more focused)", "ai"),
+    ("OLLAMA_TIMEOUT", "AI request timeout in seconds", "ai"),
 ]
 
 SELECT_KEYS = {"LB_AUTO_IGNORE_LIKED", "LB_MIN_RATING_IGNORE"}
@@ -140,6 +148,7 @@ PAGE_TEMPLATE = Template("""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trimbin</title>
 <link rel="icon" type="image/png" href="/logo.png">
+<script src="https://d3js.org/d3.v7.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px;max-width:1000px;margin:0 auto}
@@ -220,6 +229,42 @@ button.refresh-btn:hover{background:#00d474;color:#1a1a2e}
 button.refresh-btn:disabled{opacity:.4;cursor:wait}
 button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.explorer-wrap{display:flex;flex-direction:column;gap:16px}
+.treemap-container{width:100%;height:420px;background:#0d1b2a;border-radius:8px;overflow:hidden;position:relative}
+.treemap-container svg{width:100%;height:100%}
+.breadcrumbs{display:flex;gap:4px;align-items:center;flex-wrap:wrap;font-size:.8em;color:#888;margin-bottom:8px}
+.breadcrumbs span{cursor:pointer;color:#00d474;padding:2px 6px;border-radius:3px}
+.breadcrumbs span:hover{background:#0f3460}
+.breadcrumbs span.current{color:#e0e0e0;cursor:default}
+.breadcrumbs span.current:hover{background:transparent}
+.color-modes{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
+.color-modes button{font-size:.75em;padding:4px 12px;border-radius:12px;border:1px solid #0f3460;background:transparent;color:#888;cursor:pointer}
+.color-modes button.active{border-color:#00d474;color:#00d474;background:#0f346044}
+.tree-list{max-height:400px;overflow-y:auto;background:#16213e;border-radius:8px;font-size:.85em}
+.tree-row{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #0f3460;cursor:pointer}
+.tree-row:hover{background:#1e2d4a}
+.tree-row .name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tree-row .pct-bar-wrap{width:80px;display:flex;align-items:center;gap:4px}
+.tree-row .pct-bar-wrap .bar{flex:1;height:6px;background:#0f3460;border-radius:3px;overflow:hidden}
+.tree-row .pct-bar-wrap .bar .fill{height:100%;border-radius:3px}
+.tree-row .sz{color:#e94560;font-weight:600;min-width:70px;text-align:right;font-size:.9em}
+.tree-row .age{color:#888;font-size:.8em;min-width:60px;text-align:right}
+.tree-row .indent{display:inline-block}
+.tree-row .toggle{width:16px;color:#666;text-align:center;flex-shrink:0}
+.ai-panel{background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:16px;margin-top:12px}
+.ai-panel h3{color:#00d474;font-size:.9em;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.ai-panel .ai-status{font-size:.75em;padding:2px 8px;border-radius:8px}
+.ai-panel .ai-status.connected{background:#00d47433;color:#00d474;border:1px solid #00d47444}
+.ai-panel .ai-status.disconnected{background:#e9456033;color:#e94560;border:1px solid #e9456044}
+.ai-rec{padding:8px 12px;margin-bottom:6px;border-radius:6px;border-left:3px solid;font-size:.85em}
+.ai-rec.keep{border-color:#00d474;background:#00d47411}
+.ai-rec.consider{border-color:#f39c12;background:#f39c1211}
+.ai-rec.delete{border-color:#e94560;background:#e9456011}
+.ai-rec .title{font-weight:600;margin-bottom:2px}
+.ai-rec .reason{color:#888;font-size:.9em}
+.ai-rec .conf{float:right;font-size:.8em;color:#666}
+.explorer-empty{text-align:center;padding:60px 20px;color:#666}
+.explorer-empty button{margin-top:12px}
 @media(max-width:600px){
   .summary{gap:8px}
   .stat{padding:10px 6px;min-width:70px}
@@ -256,6 +301,7 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 <div class="tab" data-tab="duplicates" onclick="switchTab('duplicates')">Duplicates</div>
 <div class="tab" data-tab="trickplay" onclick="switchTab('trickplay')">Trickplay</div>
 <div class="tab" data-tab="cleanup" onclick="switchTab('cleanup')">Cleanup</div>
+<div class="tab" data-tab="explorer" onclick="switchTab('explorer')">Explorer</div>
 <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -279,6 +325,10 @@ $trickplay_html
 
 <div id="tab-cleanup" class="tab-content">
 $cleanup_html
+</div>
+
+<div id="tab-explorer" class="tab-content">
+$explorer_html
 </div>
 
 <div id="tab-settings" class="tab-content">
@@ -361,7 +411,17 @@ function executeTrim() {
           setTimeout(function(){ reloadToTab('cleanup'); }, 800);
         } else {
           showToast('Deleted: ' + title);
-          if (row) { row.style.transition = 'opacity 0.3s'; row.style.opacity = '0'; setTimeout(function(){ row.remove(); }, 350); }
+          if (row) {
+            row.style.transition = 'opacity 0.3s'; row.style.opacity = '0';
+            setTimeout(function(){
+              var tbody = row.closest('tbody');
+              row.remove();
+              if (tbody && tbody.querySelectorAll('tr').length === 0) {
+                var group = tbody.closest('div[style*="margin-bottom"]');
+                if (group) { group.style.transition = 'opacity 0.3s'; group.style.opacity = '0'; setTimeout(function(){ group.remove(); }, 350); }
+              }
+            }, 350);
+          }
         }
       } else {
         showToast('Error: ' + (d.error || 'unknown'));
@@ -463,6 +523,293 @@ function showToast(msg) {
   t.style.display = 'block';
   setTimeout(function(){ t.style.display = 'none'; }, 3000);
 }
+
+/* === Explorer: D3 Treemap + Tree List + AI === */
+var explorerData = null;
+var explorerCurrent = null;
+var explorerColorMode = 'size';
+var explorerAiRecs = {};
+
+function initExplorer() {
+  var container = document.getElementById('explorer-treemap');
+  if (!container) return;
+  fetch('/api/tree').then(function(r){ return r.json(); }).then(function(data) {
+    if (!data || !data.tree || !data.tree.children || data.tree.children.length === 0) return;
+    explorerData = data.tree;
+    explorerCurrent = explorerData;
+    renderTreemap();
+    renderTreeList();
+    updateBreadcrumbs();
+  }).catch(function(){});
+}
+
+function fmtSize(bytes) {
+  if (bytes >= 1099511627776) return (bytes / 1099511627776).toFixed(1) + ' TB';
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB';
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(0) + ' MB';
+  return (bytes / 1024).toFixed(0) + ' KB';
+}
+
+function fmtAge(mtime) {
+  if (!mtime) return '?';
+  var days = Math.floor((Date.now() / 1000 - mtime) / 86400);
+  if (days < 1) return 'today';
+  if (days < 30) return days + 'd';
+  if (days < 365) return Math.floor(days / 30) + 'mo';
+  return Math.floor(days / 365) + 'y';
+}
+
+function getColor(node, mode) {
+  if (mode === 'type') {
+    var types = node.data.types || {};
+    var max_type = '', max_val = 0;
+    for (var t in types) { if (types[t] > max_val) { max_val = types[t]; max_type = t; } }
+    var typeColors = {video:'#4a9eff', audio:'#00d474', subtitle:'#666', image:'#f39c12', metadata:'#888', junk:'#e94560', trickplay:'#9b59b6', other:'#555'};
+    return typeColors[max_type] || '#444';
+  }
+  if (mode === 'age') {
+    var mtime = node.data.mtime || 0;
+    var days = (Date.now() / 1000 - mtime) / 86400;
+    if (days < 30) return '#00d474';
+    if (days < 180) return '#7ecb20';
+    if (days < 365) return '#f39c12';
+    if (days < 730) return '#e67e22';
+    return '#e94560';
+  }
+  if (mode === 'ai') {
+    var rec = explorerAiRecs[node.data.path];
+    if (!rec) return '#333';
+    if (rec.recommendation === 'keep') return '#00d474';
+    if (rec.recommendation === 'consider_deleting') return '#f39c12';
+    if (rec.recommendation === 'safe_to_delete') return '#e94560';
+    return '#333';
+  }
+  // default: size gradient
+  var root = explorerCurrent;
+  var pct = root.size > 0 ? node.data.size / root.size : 0;
+  var r = Math.floor(15 + pct * 200);
+  var g = Math.floor(30 + (1 - pct) * 60);
+  var b = Math.floor(80 - pct * 40);
+  return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+function renderTreemap() {
+  var container = document.getElementById('explorer-treemap');
+  if (!container || !explorerCurrent) return;
+  container.innerHTML = '';
+  var w = container.clientWidth || 960;
+  var h = container.clientHeight || 420;
+
+  var root = d3.hierarchy(explorerCurrent)
+    .sum(function(d) { return (!d.children || d.children.length === 0) ? d.size : 0; })
+    .sort(function(a, b) { return b.value - a.value; });
+
+  d3.treemap().size([w, h]).padding(2).round(true)(root);
+
+  var svg = d3.select(container).append('svg').attr('width', w).attr('height', h);
+
+  var leaves = root.leaves().filter(function(d) { return d.value > 0; });
+
+  var cells = svg.selectAll('g').data(leaves).enter().append('g')
+    .attr('transform', function(d) { return 'translate(' + d.x0 + ',' + d.y0 + ')'; });
+
+  cells.append('rect')
+    .attr('width', function(d) { return Math.max(0, d.x1 - d.x0); })
+    .attr('height', function(d) { return Math.max(0, d.y1 - d.y0); })
+    .attr('fill', function(d) { return getColor(d, explorerColorMode); })
+    .attr('stroke', '#1a1a2e')
+    .attr('stroke-width', 1)
+    .style('cursor', 'pointer')
+    .on('click', function(ev, d) {
+      if (d.data.children && d.data.children.length > 0) {
+        explorerCurrent = d.data;
+        renderTreemap();
+        renderTreeList();
+        updateBreadcrumbs();
+      }
+    })
+    .append('title')
+    .text(function(d) {
+      return d.data.name + '\n' + fmtSize(d.data.size) + ' | ' + (d.data.files || 0) + ' files | modified ' + fmtAge(d.data.mtime);
+    });
+
+  cells.append('text')
+    .attr('x', 4).attr('y', 14)
+    .attr('fill', '#e0e0e0').attr('font-size', '11px').attr('font-family', 'sans-serif')
+    .text(function(d) {
+      var rw = d.x1 - d.x0, rh = d.y1 - d.y0;
+      if (rw < 50 || rh < 18) return '';
+      var label = d.data.name;
+      var maxChars = Math.floor(rw / 6.5);
+      return label.length > maxChars ? label.substr(0, maxChars - 1) + '…' : label;
+    });
+
+  cells.append('text')
+    .attr('x', 4).attr('y', 26)
+    .attr('fill', '#888').attr('font-size', '9px').attr('font-family', 'sans-serif')
+    .text(function(d) {
+      var rw = d.x1 - d.x0, rh = d.y1 - d.y0;
+      if (rw < 50 || rh < 30) return '';
+      return fmtSize(d.data.size);
+    });
+}
+
+function renderTreeList() {
+  var container = document.getElementById('explorer-tree-list');
+  if (!container || !explorerCurrent) return;
+  var children = explorerCurrent.children || [];
+  if (children.length === 0) { container.innerHTML = '<div style="padding:20px;color:#666">No subdirectories</div>'; return; }
+
+  var html = '';
+  var parentSize = explorerCurrent.size || 1;
+  for (var i = 0; i < children.length && i < 100; i++) {
+    var c = children[i];
+    var pct = parentSize > 0 ? (c.size / parentSize * 100) : 0;
+    var hasKids = c.children && c.children.length > 0;
+    var ageColor = '#888';
+    if (c.mtime) {
+      var days = (Date.now() / 1000 - c.mtime) / 86400;
+      if (days > 730) ageColor = '#e94560';
+      else if (days > 365) ageColor = '#e67e22';
+      else if (days > 180) ageColor = '#f39c12';
+    }
+    var fillColor = getColor({data: c}, explorerColorMode);
+    html += '<div class="tree-row" onclick="explorerDrillInto(' + i + ')" title="' + (c.path || '').replace(/"/g, '&quot;') + '">';
+    html += '<span class="toggle">' + (hasKids ? '&#9654;' : '&bull;') + '</span>';
+    html += '<span class="name">' + escHtml(c.name) + '</span>';
+    html += '<span class="pct-bar-wrap"><span class="bar"><span class="fill" style="width:' + Math.min(100, pct).toFixed(1) + '%;background:' + fillColor + '"></span></span><span style="font-size:.7em;color:#666">' + pct.toFixed(0) + '%</span></span>';
+    html += '<span class="sz">' + fmtSize(c.size) + '</span>';
+    html += '<span class="age" style="color:' + ageColor + '">' + fmtAge(c.mtime) + '</span>';
+    html += '</div>';
+  }
+  container.innerHTML = html;
+}
+
+function escHtml(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function updateBreadcrumbs() {
+  var el = document.getElementById('explorer-breadcrumbs');
+  if (!el) return;
+  var path = [];
+  var node = explorerCurrent;
+  // walk up from current - we only have downward refs so rebuild from root
+  path = buildPath(explorerData, explorerCurrent);
+  var html = '';
+  for (var i = 0; i < path.length; i++) {
+    var isLast = (i === path.length - 1);
+    if (isLast) {
+      html += '<span class="current">' + escHtml(path[i].name) + '</span>';
+    } else {
+      html += '<span onclick="explorerNavigateTo(' + i + ')">' + escHtml(path[i].name) + '</span> / ';
+    }
+  }
+  el.innerHTML = html;
+}
+
+function buildPath(root, target) {
+  if (root === target) return [root];
+  if (!root.children) return [];
+  for (var i = 0; i < root.children.length; i++) {
+    var p = buildPath(root.children[i], target);
+    if (p.length > 0) { p.unshift(root); return p; }
+  }
+  return [];
+}
+
+function explorerNavigateTo(idx) {
+  var path = buildPath(explorerData, explorerCurrent);
+  if (idx < path.length) {
+    explorerCurrent = path[idx];
+    renderTreemap();
+    renderTreeList();
+    updateBreadcrumbs();
+  }
+}
+
+function explorerDrillInto(childIdx) {
+  var children = explorerCurrent.children || [];
+  if (childIdx < children.length && children[childIdx].children && children[childIdx].children.length > 0) {
+    explorerCurrent = children[childIdx];
+    renderTreemap();
+    renderTreeList();
+    updateBreadcrumbs();
+  }
+}
+
+function setColorMode(mode) {
+  explorerColorMode = mode;
+  document.querySelectorAll('.color-modes button').forEach(function(b) { b.classList.toggle('active', b.dataset.mode === mode); });
+  renderTreemap();
+  renderTreeList();
+}
+
+function runTreeScan(btn) {
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spin">&#x21bb;</span> Scanning...';
+  fetch('/api/scan-tree', {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      if (d.ok) { showToast('Tree scan complete'); setTimeout(function(){ reloadToTab('explorer'); }, 800); }
+      else { showToast('Error: ' + (d.error || 'unknown')); btn.disabled = false; btn.textContent = 'Scan'; }
+    })
+    .catch(function(e) { showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
+}
+
+function explorerAiAnalyze() {
+  var statusEl = document.getElementById('ai-panel-status');
+  var recsEl = document.getElementById('ai-recs-list');
+  if (!explorerCurrent || !explorerCurrent.children) return;
+  statusEl.textContent = 'Analyzing...';
+  var items = explorerCurrent.children.slice(0, 20).map(function(c) {
+    return {name: c.name, path: c.path, size: c.size, mtime: c.mtime, types: c.types, files: c.files};
+  });
+  fetch('/api/ai/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: items})})
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      if (d.error) { statusEl.textContent = 'Error: ' + d.error; return; }
+      statusEl.textContent = d.model ? 'Model: ' + d.model : '';
+      var html = '';
+      (d.recommendations || []).forEach(function(rec) {
+        var cls = rec.recommendation === 'keep' ? 'keep' : (rec.recommendation === 'safe_to_delete' ? 'delete' : 'consider');
+        var emoji = rec.recommendation === 'keep' ? '&#9679;' : (rec.recommendation === 'safe_to_delete' ? '&#9679;' : '&#9679;');
+        explorerAiRecs[rec.path] = rec;
+        html += '<div class="ai-rec ' + cls + '">';
+        html += '<span class="conf">' + Math.round((rec.confidence || 0) * 100) + '%</span>';
+        html += '<div class="title">' + escHtml(rec.name) + ' (' + fmtSize(rec.size || 0) + ')</div>';
+        html += '<div class="reason">' + escHtml(rec.reasoning || '') + '</div>';
+        html += '</div>';
+      });
+      recsEl.innerHTML = html || '<div style="color:#666">No recommendations generated</div>';
+      if (explorerColorMode === 'ai') { renderTreemap(); renderTreeList(); }
+    })
+    .catch(function(e) { statusEl.textContent = 'Error: ' + e; });
+}
+
+function checkAiStatus() {
+  fetch('/api/ai/status').then(function(r){ return r.json(); }).then(function(d) {
+    var badge = document.getElementById('ai-connection-badge');
+    if (!badge) return;
+    if (d.connected) {
+      badge.className = 'ai-status connected';
+      badge.textContent = d.models ? d.models.length + ' models' : 'connected';
+    } else {
+      badge.className = 'ai-status disconnected';
+      badge.textContent = d.error || 'disconnected';
+    }
+  }).catch(function(){});
+}
+
+// Init explorer when tab is shown
+(function() {
+  var origSwitch = switchTab;
+  switchTab = function(name) {
+    origSwitch(name);
+    if (name === 'explorer' && !explorerData) { initExplorer(); checkAiStatus(); }
+  };
+  // Re-check hash after override is in place
+  var h = window.location.hash.replace('#', '');
+  if (h === 'explorer') { initExplorer(); checkAiStatus(); }
+})();
 </script>
 </body></html>""")
 
@@ -1112,6 +1459,277 @@ def run_cleanup_scan():
         return False, str(e)
 
 
+# === Explorer + AI ===
+
+def build_explorer_html():
+    tree_data = load_json(TREE_FILE, {})
+    scan_time = tree_data.get("last_scan", "never")
+    total = tree_data.get("total_size", 0)
+    total_files = tree_data.get("total_files", 0)
+    total_dirs = tree_data.get("total_dirs", 0)
+
+    has_data = total > 0
+
+    if has_data:
+        summary = (
+            '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;margin-top:12px">'
+            '<h2 style="margin:0;border:none;padding:0">Storage Explorer</h2>'
+            f'<button class="refresh-btn" onclick="runTreeScan(this)">Scan</button>'
+            f'<span style="color:#666;font-size:.8em">Last scan: {html.escape(scan_time)} &mdash; '
+            f'{fmt_size(gb=total / (1024**3))} / {total_files:,} files / {total_dirs:,} dirs</span>'
+            '</div>'
+        )
+    else:
+        return (
+            '<div class="explorer-empty">'
+            '<h2>Storage Explorer</h2>'
+            '<p>No tree scan data yet. Run a scan to visualize your media library.</p>'
+            '<button class="refresh-btn" onclick="runTreeScan(this)">Scan Now</button>'
+            '</div>'
+        )
+
+    return f"""{summary}
+<div class="explorer-wrap">
+<div class="breadcrumbs" id="explorer-breadcrumbs"></div>
+<div class="color-modes">
+<button class="active" data-mode="size" onclick="setColorMode('size')">By Size</button>
+<button data-mode="age" onclick="setColorMode('age')">By Age</button>
+<button data-mode="type" onclick="setColorMode('type')">By Type</button>
+<button data-mode="ai" onclick="setColorMode('ai')">By AI Rec</button>
+</div>
+<div class="treemap-container" id="explorer-treemap"></div>
+<div class="tree-list" id="explorer-tree-list"></div>
+<div class="ai-panel">
+<h3>AI Recommendations <span class="ai-status disconnected" id="ai-connection-badge">checking...</span></h3>
+<p style="font-size:.8em;color:#666;margin-bottom:10px">Analyzes the current directory's contents against your taste profile to suggest what's safe to delete.</p>
+<button class="refresh-btn" onclick="explorerAiAnalyze()" style="margin-bottom:10px">Analyze Current View</button>
+<div id="ai-panel-status" style="font-size:.8em;color:#888;margin-bottom:8px"></div>
+<div id="ai-recs-list"></div>
+</div>
+</div>"""
+
+
+def run_tree_scan():
+    try:
+        result = subprocess.run(
+            ["python3", str(APP_DIR / "tree-scan.py")],
+            capture_output=True, text=True, timeout=600,
+        )
+        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
+    except subprocess.TimeoutExpired:
+        return False, "tree scan timed out"
+    except Exception as e:
+        return False, str(e)
+
+
+def ollama_call(messages, schema=None):
+    """Call Ollama API with optional schema-constrained output."""
+    config = load_json(CONFIG_FILE, {})
+    url = config.get("OLLAMA_URL", "").rstrip("/")
+    model = config.get("OLLAMA_MODEL", "llama3.1:8b")
+    temperature = float(config.get("OLLAMA_TEMPERATURE", "0.3"))
+    timeout = int(config.get("OLLAMA_TIMEOUT", "60"))
+
+    if not url:
+        return None, "OLLAMA_URL not configured"
+
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": messages,
+        "options": {"temperature": temperature, "num_predict": 512},
+    }
+    if schema:
+        payload["format"] = schema
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{url}/api/chat", data=data,
+        headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read())
+            content = body.get("message", {}).get("content", "")
+            if schema:
+                return json.loads(content), None
+            return content, None
+    except urllib.error.URLError as e:
+        return None, f"Connection failed: {e.reason}"
+    except Exception as e:
+        return None, str(e)
+
+
+def ollama_check():
+    """Check Ollama connection, return model list or error."""
+    config = load_json(CONFIG_FILE, {})
+    url = config.get("OLLAMA_URL", "").rstrip("/")
+    if not url:
+        return {"connected": False, "error": "OLLAMA_URL not configured"}
+    try:
+        req = urllib.request.Request(f"{url}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            models = [m["name"] for m in data.get("models", [])]
+            return {"connected": True, "models": models}
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
+def compute_taste_profile():
+    """Build a media taste profile from Trimbin's watch/trim/ignore data."""
+    movies = load_json(WATCHED_LIST_FILE, [])
+    shows = load_json(SHOWS_LIST_FILE, [])
+    ignored_ids = set(load_json(IGNORED_FILE, []))
+    trimmed = load_json(DATA_DIR / "trimbin_trimmed.json", {"count": 0, "gb": 0})
+    trim_log = load_json(DATA_DIR / "trimbin_trim_log.json", [])
+
+    genre_affinity = {}
+    kept_titles = []
+    trimmed_titles = [t.get("title", "") for t in trim_log]
+
+    radarr_genres = {}
+    sonarr_genres = {}
+    try:
+        radarr_url = get_radarr_url()
+        radarr_key = get_config("RADARR_API_KEY")
+        if radarr_url and radarr_key:
+            for rm in (arr_api(radarr_url, radarr_key, "GET", "/movie") or []):
+                radarr_genres[rm.get("tmdbId")] = [g.get("name", "") for g in rm.get("genres", [])]
+    except Exception:
+        pass
+    try:
+        sonarr_url = get_sonarr_url()
+        sonarr_key = get_config("SONARR_API_KEY")
+        if sonarr_url and sonarr_key:
+            for ss in (arr_api(sonarr_url, sonarr_key, "GET", "/series") or []):
+                sonarr_genres[ss.get("tvdbId")] = [g.get("name", g) if isinstance(g, dict) else g for g in ss.get("genres", [])]
+    except Exception:
+        pass
+
+    for m in movies:
+        title = m.get("title", "")
+        genres = m.get("genres", [])
+        if isinstance(genres, str):
+            genres = [g.strip() for g in genres.split(",") if g.strip()]
+        if not genres:
+            genres = radarr_genres.get(m.get("tmdb_id"), [])
+        is_ignored = m.get("tmdb_id") in ignored_ids
+
+        if is_ignored:
+            for g in genres:
+                genre_affinity[g] = genre_affinity.get(g, 0) + 2
+            kept_titles.append(title)
+        else:
+            for g in genres:
+                genre_affinity[g] = genre_affinity.get(g, 0) + 1
+
+    for s in shows:
+        genres = s.get("genres", [])
+        if isinstance(genres, str):
+            genres = [g.strip() for g in genres.split(",") if g.strip()]
+        if not genres:
+            genres = sonarr_genres.get(s.get("tvdb_id"), [])
+        for g in genres:
+            genre_affinity[g] = genre_affinity.get(g, 0) + 1
+
+    avg_size = 0
+    sizes = [m.get("size_gb", 0) for m in movies if m.get("size_gb", 0) > 0]
+    if sizes:
+        avg_size = sum(sizes) / len(sizes)
+
+    profile = {
+        "genre_affinity": genre_affinity,
+        "total_movies_watched": len(movies),
+        "total_shows_watched": len(shows),
+        "avg_movie_size_gb": round(avg_size, 1),
+        "total_trimmed": trimmed.get("count", 0),
+        "trimmed_gb": trimmed.get("gb", 0),
+        "kept_count": len(ignored_ids),
+        "sample_kept": kept_titles[:10],
+        "sample_trimmed": trimmed_titles[:10],
+        "computed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    save_json(TASTE_FILE, profile)
+    return profile
+
+
+def ai_analyze_items(items):
+    """Get AI recommendations for a list of media items."""
+    profile = load_json(TASTE_FILE, {})
+    if not profile:
+        profile = compute_taste_profile()
+
+    config = load_json(CONFIG_FILE, {})
+    model = config.get("OLLAMA_MODEL", "llama3.1:8b")
+
+    top_genres = sorted(profile.get("genre_affinity", {}).items(), key=lambda x: x[1], reverse=True)[:10]
+    genre_str = ", ".join(f"{g} ({c})" for g, c in top_genres)
+    trimmed_str = ", ".join(profile.get("sample_trimmed", [])[:5]) or "none yet"
+    kept_str = ", ".join(profile.get("sample_kept", [])[:5]) or "none yet"
+
+    items_desc = "\n".join(
+        f"- {it['name']} | {it['size'] / (1024**3):.1f} GB | "
+        f"modified {time.strftime('%Y-%m-%d', time.localtime(it.get('mtime', 0)))} | "
+        f"files: {it.get('files', '?')} | "
+        f"types: {', '.join(f'{k}={v/(1024**3):.1f}GB' for k, v in (it.get('types') or {}).items())}"
+        for it in items[:20]
+    )
+
+    system_prompt = """You are a media library curator helping a user decide what to delete from their personal media server to free up disk space. You analyze media items and provide keep/delete recommendations based on the user's taste profile.
+
+Be practical: large files that don't align with taste are the best candidates for deletion. Recently modified files are more likely to be actively watched. Items with only metadata/subtitles and no video are likely orphans.
+
+Respond with a JSON array of recommendations, one per item, in the same order as the input."""
+
+    user_prompt = f"""## User's Taste Profile
+- Top genres: {genre_str}
+- Average movie size: {profile.get('avg_movie_size_gb', 0)} GB
+- Previously trimmed: {trimmed_str}
+- Explicitly kept: {kept_str}
+- Total trimmed: {profile.get('total_trimmed', 0)} items ({profile.get('trimmed_gb', 0)} GB)
+
+## Items to Analyze (current directory)
+{items_desc}
+
+For each item, recommend: "keep", "consider_deleting", or "safe_to_delete" with confidence (0-1) and a brief reasoning (one sentence). Return a JSON array."""
+
+    schema = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "recommendation": {"type": "string", "enum": ["keep", "consider_deleting", "safe_to_delete"]},
+                "confidence": {"type": "number"},
+                "reasoning": {"type": "string"},
+            },
+            "required": ["name", "recommendation", "confidence", "reasoning"],
+        },
+    }
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    result, error = ollama_call(messages, schema=schema)
+    if error:
+        return {"error": error}
+
+    recs = []
+    if isinstance(result, list):
+        for i, rec in enumerate(result):
+            if i < len(items):
+                rec["path"] = items[i].get("path", "")
+                rec["size"] = items[i].get("size", 0)
+                if "name" not in rec:
+                    rec["name"] = items[i].get("name", "?")
+            recs.append(rec)
+
+    return {"recommendations": recs, "model": model}
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/status":
@@ -1132,6 +1750,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_response(404)
                 self.end_headers()
+        elif self.path == "/api/tree":
+            data = load_json(TREE_FILE, {})
+            self._json_response(data)
+        elif self.path == "/api/ai/status":
+            self._json_response(ollama_check())
+        elif self.path == "/api/ai/profile":
+            profile = compute_taste_profile()
+            self._json_response({"ok": True, "profile": profile})
         elif self.path == "/ping":
             self.send_response(200)
             self.end_headers()
@@ -1162,6 +1788,18 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/scan-cleanup":
             ok, msg = run_cleanup_scan()
             self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path == "/api/scan-tree":
+            ok, msg = run_tree_scan()
+            self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path == "/api/ai/analyze":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            items = body.get("items", [])
+            if not items:
+                self._json_response({"error": "No items provided"})
+            else:
+                result = ai_analyze_items(items)
+                self._json_response(result)
         elif self.path == "/api/settings":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length)) if length else {}
@@ -1320,6 +1958,7 @@ class Handler(BaseHTTPRequestHandler):
             duplicates_html=build_duplicates_html(),
             trickplay_html=build_trickplay_html(),
             cleanup_html=build_cleanup_html(),
+            explorer_html=build_explorer_html(),
             settings_html=build_settings_html(),
         )
         self.send_response(200)
