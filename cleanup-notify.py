@@ -139,21 +139,37 @@ def scrape_letterboxd_movies():
     page = 1
     while True:
         url = f"{base_url}page/{page}/"
-        try:
-            html_text = http_get(url, referer=base_url)
-        except urllib.error.HTTPError as e:
-            if e.code in (404, 403):
+        html_text = None
+        for attempt in range(3):
+            try:
+                html_text = http_get(url, referer=base_url)
                 break
-            raise
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    break
+                if e.code == 403 and attempt < 2:
+                    log.warning("letterboxd page %d: 403, retrying in %ds", page, 10 * (attempt + 1))
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                if e.code == 403:
+                    log.error("letterboxd page %d: 403 after 3 attempts, aborting scrape", page)
+                    break
+                raise
+        if html_text is None:
+            break
         page_slugs = []
-        for m in re.finditer(r'<[^>]+data-film-slug="([^"]+)"[^>]*>', html_text):
-            slug = m.group(1)
-            if slug not in seen:
-                page_slugs.append(slug)
-                seen.add(slug)
-                rm = re.search(r'data-owner-rating="(\d+)"', m.group(0))
-                if rm:
-                    slug_to_rating[slug] = int(rm.group(1)) / 2.0
+        for item in re.findall(r'<li class="griditem">(.*?)</li>', html_text, re.DOTALL):
+            sm = re.search(r'data-item-slug="([^"]+)"', item)
+            if not sm:
+                continue
+            slug = sm.group(1)
+            if slug in seen:
+                continue
+            page_slugs.append(slug)
+            seen.add(slug)
+            rm = re.search(r'rated-(\d+)', item)
+            if rm:
+                slug_to_rating[slug] = int(rm.group(1)) / 2.0
         if not page_slugs:
             alt = re.findall(r'data-target-link="/film/([^"/]+)/"', html_text)
             page_slugs = [s for s in alt if s not in seen]
@@ -164,7 +180,7 @@ def scrape_letterboxd_movies():
         slugs.extend(page_slugs)
         log.info("letterboxd page %d: %d films (total %d)", page, len(page_slugs), len(slugs))
         page += 1
-        time.sleep(2)
+        time.sleep(4)
 
     slug_cache = load_json(SLUG_CACHE, {})
     watched = {}
@@ -190,13 +206,25 @@ def scrape_letterboxd_likes():
     page = 1
     while True:
         url = f"{base_url}page/{page}/"
-        try:
-            html_text = http_get(url, referer=base_url)
-        except urllib.error.HTTPError as e:
-            if e.code in (404, 403):
+        html_text = None
+        for attempt in range(3):
+            try:
+                html_text = http_get(url, referer=base_url)
                 break
-            raise
-        page_slugs = re.findall(r'data-film-slug="([^"]+)"', html_text)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    break
+                if e.code == 403 and attempt < 2:
+                    log.warning("letterboxd likes page %d: 403, retrying in %ds", page, 10 * (attempt + 1))
+                    time.sleep(10 * (attempt + 1))
+                    continue
+                if e.code == 403:
+                    log.error("letterboxd likes page %d: 403 after 3 attempts, aborting", page)
+                    break
+                raise
+        if html_text is None:
+            break
+        page_slugs = re.findall(r'data-item-slug="([^"]+)"', html_text)
         if not page_slugs:
             page_slugs = re.findall(r'data-target-link="/film/([^"/]+)/"', html_text)
         new = [s for s in page_slugs if s not in liked_slugs]
@@ -206,7 +234,7 @@ def scrape_letterboxd_likes():
         log.info("letterboxd likes page %d: %d films (total %d)",
                  page, len(new), len(liked_slugs))
         page += 1
-        time.sleep(2)
+        time.sleep(4)
 
     slug_cache = load_json(SLUG_CACHE, {})
     liked_tmdb = set()
@@ -665,11 +693,12 @@ def main():
                 "year": movie["year"],
                 "size_gb": movie["size_gb"],
                 "radarr_id": movie["radarr_id"],
-                "new": tmdb_id not in notified,
+                "new": (not first_run) and (tmdb_id not in notified),
                 "sources": sources,
                 "watch_count": watch_count,
                 "total_users": total_users,
                 "watched_by": watched_by,
+                "rating": lb_ratings.get(tmdb_id),
             })
     watched_on_disk.sort(key=lambda x: x["size_gb"], reverse=True)
 

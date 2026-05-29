@@ -2,6 +2,17 @@
 
 All notable changes to Trimbin are documented here. Newest entries on top.
 
+## 2026-05-29
+
+- **Storage Explorer + AI recommendations (v2.4)** — New "Explorer" tab: a D3 zoomable treemap + sortable tree list over your media libraries with four view modes (By Size / Age / Type / AI), plus optional local-LLM (Ollama) keep/delete recommendations driven by a taste profile built from your Radarr/Sonarr genres and trim history. Inline Trim and quality-profile controls per item. Requires `MEDIA_LIBRARIES`.
+- **Cross-library duplicate detection for TV/anime** — `dedup-scan.py` now finds the same series duplicated across libraries (e.g. a show in both `/tv` and `/anime`) via Sonarr TVDB IDs, alongside the existing Radarr/TMDB movie dedup. Adds audio-format detection (FLAC/AAC/TrueHD/DTS) to tell otherwise-identical copies apart.
+- **Explorer UX fixes** — trimming an item updates the view immediately (no stale "not found" on re-click); treemap leaf cells open the quality dropdown on click; view-mode buttons now re-sort the list (not just recolor); muted the color palette.
+- **Hardened delete safety** — the path-deletion guard resolves symlinks/`..` and requires the real path to be *inside* a configured library (a plain prefix check could authorize a sibling like `/media/movies-4k`); symlinks are unlinked, never followed.
+- **Portability** — `tree-scan.py` now honors `DATA_DIR` and tolerates malformed config like the other scanners; Explorer media-action detection derives from `MEDIA_LIBRARIES` instead of hardcoded paths; unreadable directories are no longer mistaken for empty/deletable; the Dockerfile now ships `tree-scan.py`; `.env.example` documents `MEDIA_LIBRARIES`, Ollama, browser URLs, digest time, and auto-ignore. First-run scans no longer report the whole library as "new."
+- **Split API vs browser URLs** — `RADARR_BROWSER_URL` / `SONARR_BROWSER_URL` allow the in-container API URL to differ from the clickable links in the UI.
+- **qBittorrent purge-on-trim** — trimming a movie/show also removes the matching torrent from qBittorrent.
+- **Letterboxd auto-ignore** — optionally auto-ignore films you liked or rated at/above a threshold.
+
 ## 2026-05-21
 
 - **Cleanup scanner** — New `cleanup-scan.py` scans media libraries for orphan subtitles, orphan images (metadata in empty movie dirs), OS junk (Thumbs.db, .DS_Store), sample files/dirs, and empty directories. Smart detection avoids flagging files that are part of media releases (anime extras, booklets, soundtrack scans).

@@ -8,10 +8,12 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
 from string import Template
 
@@ -29,9 +31,11 @@ PORT = int(os.environ.get("PORT", "5380"))
 
 CONFIG_KEYS = [
     ("LETTERBOXD_USER", "Letterboxd username", "letterboxd"),
-    ("RADARR_URL", "Radarr URL", "radarr"),
+    ("RADARR_URL", "Radarr API URL (container-reachable)", "radarr"),
+    ("RADARR_BROWSER_URL", "Radarr browser URL (for UI links, e.g. https://radarr.example.com)", "radarr"),
     ("RADARR_API_KEY", "Radarr API key", "radarr"),
-    ("SONARR_URL", "Sonarr URL", "sonarr"),
+    ("SONARR_URL", "Sonarr API URL (container-reachable)", "sonarr"),
+    ("SONARR_BROWSER_URL", "Sonarr browser URL (for UI links, e.g. https://sonarr.example.com)", "sonarr"),
     ("SONARR_API_KEY", "Sonarr API key", "sonarr"),
     ("SIMKL_CLIENT_ID", "Simkl client ID", "simkl"),
     ("SIMKL_ACCESS_TOKEN", "Simkl access token", "simkl"),
@@ -80,8 +84,20 @@ def get_radarr_url():
     return get_config("RADARR_URL").rstrip("/")
 
 
+def get_radarr_browser_url():
+    """URL for browser-facing links (Radarr button in UI). Falls back to RADARR_URL."""
+    url = get_config("RADARR_BROWSER_URL")
+    return url.rstrip("/") if url else get_radarr_url()
+
+
 def get_sonarr_url():
     return get_config("SONARR_URL").rstrip("/")
+
+
+def get_sonarr_browser_url():
+    """URL for browser-facing links (Sonarr button in UI). Falls back to SONARR_URL."""
+    url = get_config("SONARR_BROWSER_URL")
+    return url.rstrip("/") if url else get_sonarr_url()
 
 
 TRIM_LOG_FILE = DATA_DIR / "trimbin_trim_log.json"
@@ -148,7 +164,7 @@ PAGE_TEMPLATE = Template("""<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trimbin</title>
 <link rel="icon" type="image/png" href="/logo.png">
-<script src="https://d3js.org/d3.v7.min.js"></script>
+<script defer src="https://d3js.org/d3.v7.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px;max-width:1000px;margin:0 auto}
@@ -179,6 +195,7 @@ tr:hover{background:#1e2d4a}
 .badge.watched{background:#00d474;color:#1a1a2e}
 .badge.auto-liked{background:#e94560;color:#fff}
 .badge.auto-rated{background:#f39c12;color:#1a1a2e}
+.badge.rating{background:#8b5cf6;color:#fff}
 .pct-bar{display:inline-block;width:60px;height:8px;background:#0f3460;border-radius:4px;overflow:hidden;vertical-align:middle;margin-right:6px}
 .pct-fill{height:100%;border-radius:4px}
 .pct-100 .pct-fill{background:#00d474}
@@ -240,17 +257,23 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 .color-modes{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap}
 .color-modes button{font-size:.75em;padding:4px 12px;border-radius:12px;border:1px solid #0f3460;background:transparent;color:#888;cursor:pointer}
 .color-modes button.active{border-color:#00d474;color:#00d474;background:#0f346044}
-.tree-list{max-height:400px;overflow-y:auto;background:#16213e;border-radius:8px;font-size:.85em}
-.tree-row{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid #0f3460;cursor:pointer}
+.tree-list{max-height:500px;overflow-y:auto;background:#16213e;border-radius:8px;font-size:.85em;position:relative}
+.tree-row{display:grid;grid-template-columns:20px 1fr 90px 80px 70px 130px;align-items:center;gap:6px;padding:6px 12px;border-bottom:1px solid #0f3460;cursor:pointer}
 .tree-row:hover{background:#1e2d4a}
-.tree-row .name{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.tree-row .pct-bar-wrap{width:80px;display:flex;align-items:center;gap:4px}
+.tree-row .name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.tree-row .pct-bar-wrap{display:flex;align-items:center;gap:4px}
 .tree-row .pct-bar-wrap .bar{flex:1;height:6px;background:#0f3460;border-radius:3px;overflow:hidden}
 .tree-row .pct-bar-wrap .bar .fill{height:100%;border-radius:3px}
-.tree-row .sz{color:#e94560;font-weight:600;min-width:70px;text-align:right;font-size:.9em}
-.tree-row .age{color:#888;font-size:.8em;min-width:60px;text-align:right}
-.tree-row .indent{display:inline-block}
-.tree-row .toggle{width:16px;color:#666;text-align:center;flex-shrink:0}
+.tree-row .sz{color:#e94560;font-weight:600;text-align:right;font-size:.9em}
+.tree-row .age{color:#888;font-size:.8em;text-align:right}
+.tree-row .toggle{color:#666;text-align:center}
+.tree-row .actions{display:flex;gap:4px;justify-content:flex-end}
+.tree-row .actions button{font-size:.7em;padding:3px 8px;border-radius:3px;border:1px solid #0f3460;background:transparent;color:#888;cursor:pointer;white-space:nowrap}
+.tree-row .actions button:hover{border-color:#00d474;color:#00d474}
+.tree-row .actions button.trim-btn:hover{border-color:#e94560;color:#e94560}
+.tree-row.leaf{cursor:default;opacity:.8}
+.tree-row.hdr-row{cursor:default;font-size:.75em;color:#666;padding:4px 12px;border-bottom:2px solid #0f3460;position:sticky;top:0;background:#16213e;z-index:2}
+.tree-row.hdr-row .name{font-weight:600}.tree-row.hdr-row .sz{color:#666;font-weight:600}.tree-row.hdr-row .age{font-weight:600}.tree-row.hdr-row .actions{font-weight:600;color:#666;font-size:1em}
 .ai-panel{background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:16px;margin-top:12px}
 .ai-panel h3{color:#00d474;font-size:.9em;margin-bottom:10px;display:flex;align-items:center;gap:8px}
 .ai-panel .ai-status{font-size:.75em;padding:2px 8px;border-radius:8px}
@@ -278,6 +301,17 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
   .field label{min-width:0}
 }
 </style>
+<script>
+function switchTab(name) {
+  document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
+  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
+  var el = document.getElementById('tab-' + name);
+  if (el) el.classList.add('active');
+  var btn = document.querySelector('.tab[data-tab="' + name + '"]');
+  if (btn) btn.classList.add('active');
+  window.location.hash = name;
+}
+</script>
 </head>
 <body>
 <div class="header-row">
@@ -559,37 +593,69 @@ function fmtAge(mtime) {
   return Math.floor(days / 365) + 'y';
 }
 
+var TYPE_COLORS = {video:'#46688f', audio:'#4a8466', subtitle:'#566370', image:'#9c7d44', metadata:'#6a6a72', junk:'#9c5560', trickplay:'#6d5d8a', other:'#555'};
+
+function domType(node) {
+  var types = node.types || {};
+  var mt = '', mv = 0;
+  for (var t in types) { if (types[t] > mv) { mv = types[t]; mt = t; } }
+  return mt;
+}
+
+function aiRank(node) {
+  var r = explorerAiRecs[node.path];
+  if (!r) return -1;
+  if (r.recommendation === 'safe_to_delete') return 3;
+  if (r.recommendation === 'consider_deleting') return 2;
+  if (r.recommendation === 'keep') return 1;
+  return 0;
+}
+
+function isMediaPath(p) {
+  if (!p) return false;
+  var roots = window.TRIMBIN_MEDIA_ROOTS || [];  // already trailing-slash-stripped server-side
+  for (var i = 0; i < roots.length; i++) {
+    if (roots[i] && p.indexOf(roots[i] + '/') === 0) return true;
+  }
+  return false;
+}
+
+// Sort a level's children by the active mode (so "By Age"/"By Type" actually re-order the list, not just recolor)
+function sortChildren(children, mode) {
+  var arr = children.slice();
+  if (mode === 'age') return arr.sort(function(a, b) { return (a.mtime || 0) - (b.mtime || 0); });        // oldest first
+  if (mode === 'type') return arr.sort(function(a, b) { var ta = domType(a) || '~', tb = domType(b) || '~'; return ta < tb ? -1 : ta > tb ? 1 : (b.size - a.size); });
+  if (mode === 'ai') return arr.sort(function(a, b) { return (aiRank(b) - aiRank(a)) || (b.size - a.size); }); // delete-worthy first
+  return arr.sort(function(a, b) { return b.size - a.size; });                                              // size (default)
+}
+
 function getColor(node, mode) {
   if (mode === 'type') {
-    var types = node.data.types || {};
-    var max_type = '', max_val = 0;
-    for (var t in types) { if (types[t] > max_val) { max_val = types[t]; max_type = t; } }
-    var typeColors = {video:'#4a9eff', audio:'#00d474', subtitle:'#666', image:'#f39c12', metadata:'#888', junk:'#e94560', trickplay:'#9b59b6', other:'#555'};
-    return typeColors[max_type] || '#444';
+    return TYPE_COLORS[domType(node.data)] || '#444';
   }
   if (mode === 'age') {
-    var mtime = node.data.mtime || 0;
-    var days = (Date.now() / 1000 - mtime) / 86400;
-    if (days < 30) return '#00d474';
-    if (days < 180) return '#7ecb20';
-    if (days < 365) return '#f39c12';
-    if (days < 730) return '#e67e22';
-    return '#e94560';
+    var days = (Date.now() / 1000 - (node.data.mtime || 0)) / 86400;
+    if (days < 30) return '#3f7d5a';
+    if (days < 180) return '#5f7d45';
+    if (days < 365) return '#8a7a3c';
+    if (days < 730) return '#9a6a3c';
+    return '#9a5450';
   }
   if (mode === 'ai') {
     var rec = explorerAiRecs[node.data.path];
-    if (!rec) return '#333';
-    if (rec.recommendation === 'keep') return '#00d474';
-    if (rec.recommendation === 'consider_deleting') return '#f39c12';
-    if (rec.recommendation === 'safe_to_delete') return '#e94560';
-    return '#333';
+    if (!rec) return '#3a3a4a';
+    if (rec.recommendation === 'keep') return '#3f8a5e';
+    if (rec.recommendation === 'consider_deleting') return '#a07f3a';
+    if (rec.recommendation === 'safe_to_delete') return '#9c5560';
+    return '#3a3a4a';
   }
-  // default: size gradient
+  // default: muted size gradient (cool slate -> warm terracotta, no neon)
   var root = explorerCurrent;
   var pct = root.size > 0 ? node.data.size / root.size : 0;
-  var r = Math.floor(15 + pct * 200);
-  var g = Math.floor(30 + (1 - pct) * 60);
-  var b = Math.floor(80 - pct * 40);
+  pct = Math.pow(Math.min(1, pct), 0.45);
+  var r = Math.round(46 + pct * 144);
+  var g = Math.round(72 + pct * 38);
+  var b = Math.round(112 - pct * 52);
   return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
 
@@ -599,58 +665,66 @@ function renderTreemap() {
   container.innerHTML = '';
   var w = container.clientWidth || 960;
   var h = container.clientHeight || 420;
-
+  var children = explorerCurrent.children || [];
+  if (children.length === 0) {
+    container.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#666">No subdirectories — ' + (explorerCurrent.files || 0) + ' files, ' + fmtSize(explorerCurrent.size) + '</div>';
+    return;
+  }
   var root = d3.hierarchy(explorerCurrent)
     .sum(function(d) { return (!d.children || d.children.length === 0) ? d.size : 0; })
     .sort(function(a, b) { return b.value - a.value; });
-
-  d3.treemap().size([w, h]).padding(2).round(true)(root);
-
+  d3.treemap().size([w, h]).padding(3).round(true)(root);
   var svg = d3.select(container).append('svg').attr('width', w).attr('height', h);
-
-  var leaves = root.leaves().filter(function(d) { return d.value > 0; });
-
-  var cells = svg.selectAll('g').data(leaves).enter().append('g')
+  var nodes = (root.children || []).filter(function(d) { return d.value > 0; });
+  var cells = svg.selectAll('g').data(nodes).enter().append('g')
     .attr('transform', function(d) { return 'translate(' + d.x0 + ',' + d.y0 + ')'; });
-
   cells.append('rect')
     .attr('width', function(d) { return Math.max(0, d.x1 - d.x0); })
     .attr('height', function(d) { return Math.max(0, d.y1 - d.y0); })
     .attr('fill', function(d) { return getColor(d, explorerColorMode); })
     .attr('stroke', '#1a1a2e')
-    .attr('stroke-width', 1)
-    .style('cursor', 'pointer')
+    .attr('stroke-width', 1.5)
+    .attr('rx', 3)
+    .style('cursor', function(d) { return ((d.data.children && d.data.children.length > 0) || isMediaPath(d.data.path)) ? 'pointer' : 'default'; })
     .on('click', function(ev, d) {
       if (d.data.children && d.data.children.length > 0) {
         explorerCurrent = d.data;
         renderTreemap();
         renderTreeList();
         updateBreadcrumbs();
+      } else if (isMediaPath(d.data.path)) {
+        explorerQualityByPath(d.data.path, {top: ev.clientY, bottom: ev.clientY, right: ev.clientX + 100});
       }
     })
     .append('title')
     .text(function(d) {
-      return d.data.name + '\n' + fmtSize(d.data.size) + ' | ' + (d.data.files || 0) + ' files | modified ' + fmtAge(d.data.mtime);
+      return d.data.name + '\\n' + fmtSize(d.data.size) + ' | ' + (d.data.files || 0) + ' files | ' + (d.data.dirs || 0) + ' dirs | modified ' + fmtAge(d.data.mtime);
     });
-
   cells.append('text')
-    .attr('x', 4).attr('y', 14)
-    .attr('fill', '#e0e0e0').attr('font-size', '11px').attr('font-family', 'sans-serif')
+    .attr('x', 6).attr('y', 16)
+    .attr('fill', '#e0e0e0').attr('font-size', '12px').attr('font-weight', '600').attr('font-family', 'sans-serif')
     .text(function(d) {
       var rw = d.x1 - d.x0, rh = d.y1 - d.y0;
-      if (rw < 50 || rh < 18) return '';
+      if (rw < 60 || rh < 20) return '';
       var label = d.data.name;
-      var maxChars = Math.floor(rw / 6.5);
+      var maxChars = Math.floor(rw / 7);
       return label.length > maxChars ? label.substr(0, maxChars - 1) + '…' : label;
     });
-
   cells.append('text')
-    .attr('x', 4).attr('y', 26)
-    .attr('fill', '#888').attr('font-size', '9px').attr('font-family', 'sans-serif')
+    .attr('x', 6).attr('y', 30)
+    .attr('fill', '#aaa').attr('font-size', '10px').attr('font-family', 'sans-serif')
     .text(function(d) {
       var rw = d.x1 - d.x0, rh = d.y1 - d.y0;
-      if (rw < 50 || rh < 30) return '';
+      if (rw < 60 || rh < 36) return '';
       return fmtSize(d.data.size);
+    });
+  cells.append('text')
+    .attr('x', 6).attr('y', 42)
+    .attr('fill', '#666').attr('font-size', '9px').attr('font-family', 'sans-serif')
+    .text(function(d) {
+      var rw = d.x1 - d.x0, rh = d.y1 - d.y0;
+      if (rw < 80 || rh < 48) return '';
+      return (d.data.files || 0) + ' files';
     });
 }
 
@@ -658,12 +732,31 @@ function renderTreeList() {
   var container = document.getElementById('explorer-tree-list');
   if (!container || !explorerCurrent) return;
   var children = explorerCurrent.children || [];
-  if (children.length === 0) { container.innerHTML = '<div style="padding:20px;color:#666">No subdirectories</div>'; return; }
+  if (children.length === 0) { container.innerHTML = '<div style="padding:20px;color:#666">No subdirectories — leaf directory with ' + (explorerCurrent.files || 0) + ' files</div>'; return; }
 
-  var html = '';
+  var sorted = sortChildren(children, explorerColorMode);
+  var html = '<div class="tree-row hdr-row">';
+  html += '<span class="toggle"></span>';
+  html += '<span class="name">Name</span>';
+  html += '<span class="pct-bar-wrap">Share</span>';
+  html += '<span class="sz">Size</span>';
+  html += '<span class="age">Modified</span>';
+  html += '<span class="actions">Actions</span>';
+  html += '</div>';
+  if (explorerCurrent !== explorerData) {
+    html += '<div class="tree-row" onclick="explorerGoUp()">';
+    html += '<span class="toggle" style="color:#00d474">&#9650;</span>';
+    html += '<span class="name" style="color:#00d474">..</span>';
+    html += '<span class="pct-bar-wrap"></span>';
+    html += '<span class="sz" style="color:#666">Go up</span>';
+    html += '<span class="age"></span>';
+    html += '<span class="actions"></span>';
+    html += '</div>';
+  }
   var parentSize = explorerCurrent.size || 1;
-  for (var i = 0; i < children.length && i < 100; i++) {
-    var c = children[i];
+  for (var i = 0; i < sorted.length && i < 200; i++) {
+    var c = sorted[i];
+    var origIdx = children.indexOf(c);
     var pct = parentSize > 0 ? (c.size / parentSize * 100) : 0;
     var hasKids = c.children && c.children.length > 0;
     var ageColor = '#888';
@@ -674,12 +767,20 @@ function renderTreeList() {
       else if (days > 180) ageColor = '#f39c12';
     }
     var fillColor = getColor({data: c}, explorerColorMode);
-    html += '<div class="tree-row" onclick="explorerDrillInto(' + i + ')" title="' + (c.path || '').replace(/"/g, '&quot;') + '">';
+    var rowClass = hasKids ? 'tree-row' : 'tree-row leaf';
+    html += '<div class="' + rowClass + '" onclick="explorerDrillInto(' + origIdx + ')" title="' + (c.path || '').replace(/"/g, '&quot;') + '">';
     html += '<span class="toggle">' + (hasKids ? '&#9654;' : '&bull;') + '</span>';
     html += '<span class="name">' + escHtml(c.name) + '</span>';
     html += '<span class="pct-bar-wrap"><span class="bar"><span class="fill" style="width:' + Math.min(100, pct).toFixed(1) + '%;background:' + fillColor + '"></span></span><span style="font-size:.7em;color:#666">' + pct.toFixed(0) + '%</span></span>';
     html += '<span class="sz">' + fmtSize(c.size) + '</span>';
     html += '<span class="age" style="color:' + ageColor + '">' + fmtAge(c.mtime) + '</span>';
+    var p = c.path || '';
+    html += '<span class="actions">';
+    if (isMediaPath(p)) {
+      html += '<button class="trim-btn" onclick="event.stopPropagation();explorerTrim(' + origIdx + ')">Trim</button>';
+      html += '<button onclick="event.stopPropagation();explorerQuality(this,' + origIdx + ')">Quality &#9662;</button>';
+    }
+    html += '</span>';
     html += '</div>';
   }
   container.innerHTML = html;
@@ -726,6 +827,16 @@ function explorerNavigateTo(idx) {
   }
 }
 
+function explorerGoUp() {
+  var path = buildPath(explorerData, explorerCurrent);
+  if (path.length >= 2) {
+    explorerCurrent = path[path.length - 2];
+    renderTreemap();
+    renderTreeList();
+    updateBreadcrumbs();
+  }
+}
+
 function explorerDrillInto(childIdx) {
   var children = explorerCurrent.children || [];
   if (childIdx < children.length && children[childIdx].children && children[childIdx].children.length > 0) {
@@ -759,11 +870,14 @@ function explorerAiAnalyze() {
   var statusEl = document.getElementById('ai-panel-status');
   var recsEl = document.getElementById('ai-recs-list');
   if (!explorerCurrent || !explorerCurrent.children) return;
-  statusEl.textContent = 'Analyzing...';
-  var items = explorerCurrent.children.slice(0, 20).map(function(c) {
+  statusEl.textContent = 'Analyzing (this may take a minute)...';
+  var sorted = explorerCurrent.children.slice().sort(function(a, b) { return b.size - a.size; });
+  var items = sorted.slice(0, 5).map(function(c) {
     return {name: c.name, path: c.path, size: c.size, mtime: c.mtime, types: c.types, files: c.files};
   });
-  fetch('/api/ai/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: items})})
+  var ctrl = new AbortController();
+  var timer = setTimeout(function(){ ctrl.abort(); }, 120000);
+  fetch('/api/ai/analyze', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: items}), signal: ctrl.signal})
     .then(function(r){ return r.json(); })
     .then(function(d) {
       if (d.error) { statusEl.textContent = 'Error: ' + d.error; return; }
@@ -782,7 +896,116 @@ function explorerAiAnalyze() {
       recsEl.innerHTML = html || '<div style="color:#666">No recommendations generated</div>';
       if (explorerColorMode === 'ai') { renderTreemap(); renderTreeList(); }
     })
-    .catch(function(e) { statusEl.textContent = 'Error: ' + e; });
+    .catch(function(e) {
+      var msg = e.name === 'AbortError' ? 'Request timed out — try fewer items or check Ollama' : String(e);
+      statusEl.textContent = 'Error: ' + msg;
+    })
+    .finally(function() { clearTimeout(timer); });
+}
+
+function explorerTrim(idx) {
+  var parent = explorerCurrent;
+  var c = (parent.children || [])[idx];
+  if (!c) return;
+  var path = c.path || '';
+  if (!confirm('Trim "' + c.name + '" (' + fmtSize(c.size) + ')?\\nThis will delete files and remove from Radarr/Sonarr.')) return;
+  fetch('/api/explorer/lookup?path=' + encodeURIComponent(path))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.error) { showToast('Not found in Radarr/Sonarr: ' + d.error); return; }
+      var trimUrl = d.type === 'movie' ? '/api/trim/' + d.tmdbId : '/api/trim-show/' + d.id;
+      fetch(trimUrl, {method: 'POST'}).then(function(r) { return r.json(); }).then(function(r) {
+        if (r.ok) {
+          showToast('Trimmed: ' + d.title);
+          // Drop the node from the live tree + decrement ancestor sizes so the view refreshes
+          // immediately (the cached /api/tree still has it until the next Scan).
+          var ki = (parent.children || []).indexOf(c);
+          if (ki >= 0) {
+            parent.children.splice(ki, 1);
+            var pth = buildPath(explorerData, parent);
+            for (var j = 0; j < pth.length; j++) { pth[j].size = Math.max(0, (pth[j].size || 0) - (c.size || 0)); }
+          }
+          if (explorerCurrent === parent) { renderTreemap(); renderTreeList(); updateBreadcrumbs(); }
+        } else { showToast('Trim error: ' + (r.error || 'unknown')); }
+      });
+    })
+    .catch(function(e) { showToast('Error: ' + e); });
+}
+
+function explorerQuality(btn, idx) {
+  var c = (explorerCurrent.children || [])[idx];
+  if (!c) return;
+  btn.disabled = true;
+  btn.textContent = '...';
+  openQualityDropdown(c.path || '', btn.getBoundingClientRect(), btn);
+}
+
+function explorerQualityByPath(path, anchor) {
+  openQualityDropdown(path, anchor, null);
+}
+
+// path = media path; anchor = rect-like {top,bottom,right} in viewport coords; restoreBtn = optional button to reset
+function openQualityDropdown(path, anchor, restoreBtn) {
+  var old = document.getElementById('quality-dropdown');
+  if (old) old.remove();
+  function restore() { if (restoreBtn) { restoreBtn.disabled = false; restoreBtn.innerHTML = 'Quality &#9662;'; } }
+  Promise.all([
+    fetch('/api/explorer/lookup?path=' + encodeURIComponent(path)).then(function(r){return r.json();}),
+    fetch('/api/explorer/quality-profiles').then(function(r){return r.json();})
+  ]).then(function(results) {
+    var lookup = results[0];
+    var profiles = results[1];
+    restore();
+    if (lookup.error) { showToast('Not in Radarr/Sonarr: ' + lookup.error); return; }
+    var profileList = lookup.type === 'movie' ? (profiles.radarr || []) : (profiles.sonarr || []);
+    if (profileList.length === 0) { showToast('No quality profiles found — check Radarr/Sonarr connection'); return; }
+    var currentId = lookup.qualityProfileId;
+    var dd = document.createElement('div');
+    dd.id = 'quality-dropdown';
+    dd.style.cssText = 'position:fixed;background:#16213e;border:1px solid #0f3460;border-radius:6px;padding:4px 0;z-index:999;min-width:200px;max-height:300px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.6)';
+    var estHeight = Math.min(profileList.length * 30 + 40, 300);
+    var spaceBelow = window.innerHeight - anchor.bottom - 8;
+    if (spaceBelow < estHeight && anchor.top > estHeight) {
+      dd.style.bottom = (window.innerHeight - anchor.top + 2) + 'px';
+    } else {
+      dd.style.top = (anchor.bottom + 2) + 'px';
+    }
+    dd.style.left = Math.max(4, Math.min(anchor.right - 200, window.innerWidth - 210)) + 'px';
+    var header = document.createElement('div');
+    header.style.cssText = 'padding:6px 12px;font-size:.75em;color:#888;border-bottom:1px solid #0f3460';
+    header.textContent = lookup.title + ' — ' + (lookup.type === 'movie' ? 'Radarr' : 'Sonarr');
+    dd.appendChild(header);
+    profileList.forEach(function(p) {
+      var item = document.createElement('div');
+      var isCurrent = p.id === currentId;
+      item.style.cssText = 'padding:6px 12px;cursor:pointer;font-size:.8em;color:' + (isCurrent ? '#00d474' : '#ccc');
+      item.textContent = p.name + (isCurrent ? ' ✓' : '');
+      item.onmouseover = function() { this.style.background = '#1e2d4a'; };
+      item.onmouseout = function() { this.style.background = 'transparent'; };
+      item.onclick = function() {
+        closeQDD();
+        if (isCurrent) return;
+        var doSearch = confirm('Change quality profile to ' + p.name + ' and search for upgrade?\\n\\nOK = change profile + search for new file\\nCancel = change profile only');
+        fetch('/api/explorer/set-quality', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({type: lookup.type, id: lookup.id, qualityProfileId: p.id, search: doSearch})
+        }).then(function(r){return r.json();}).then(function(d) {
+          if (d.ok) { showToast('Quality → ' + p.name + (doSearch ? ' (searching)' : '')); renderTreeList(); }
+          else showToast('Error: ' + (d.error || 'unknown'));
+        }).catch(function(e) { showToast('Error: ' + e); });
+      };
+      dd.appendChild(item);
+    });
+    document.body.appendChild(dd);
+    var treeList = document.getElementById('explorer-tree-list');
+    function closeQDD() { dd.remove(); document.removeEventListener('click', onClickOut); if (treeList) treeList.removeEventListener('scroll', closeQDD); }
+    function onClickOut(ev) { if (!dd.contains(ev.target) && ev.target !== restoreBtn) closeQDD(); }
+    setTimeout(function() {
+      document.addEventListener('click', onClickOut);
+      if (treeList) treeList.addEventListener('scroll', closeQDD);
+    }, 0);
+  }).catch(function(e) { restore(); showToast('Error loading profiles: ' + e); });
 }
 
 function checkAiStatus() {
@@ -827,7 +1050,7 @@ def _auto_ignored_cache():
 
 
 def build_movie_row(m, ignored=False):
-    radarr_url = get_radarr_url()
+    radarr_url = get_radarr_browser_url()
     badge_new = '<span class="badge new">NEW</span>' if m.get("new") and not ignored else ""
     sources = m.get("sources", [])
     badge_src = " ".join(f'<span class="badge src">{html.escape(s)}</span>' for s in sources)
@@ -847,6 +1070,10 @@ def build_movie_row(m, ignored=False):
         elif reason.startswith("rated"):
             badge_auto = f'<span class="badge auto-rated">{html.escape(reason)}</span>'
 
+    badge_rating = ""
+    if m.get("rating"):
+        stars = m["rating"]
+        badge_rating = f'<span class="badge rating">{stars:g}★</span>'
     slug = slug_from_title(m["title"], m.get("year", ""))
     title = html.escape(m["title"])
     year = m.get("year", "?")
@@ -857,7 +1084,7 @@ def build_movie_row(m, ignored=False):
     if ignored:
         actions = f'<button class="restore" onclick="doRestore({tmdb})">Restore</button>'
     else:
-        arr_link = f'<a class="arr-link" href="{radarr_url}/movie/{rid}" target="_blank">Radarr</a>' if radarr_url else ''
+        arr_link = f'<a class="arr-link" href="{radarr_url}/movie/{tmdb}" target="_blank">Radarr</a>' if radarr_url else ''
         actions = (
             f'<button class="trim" onclick="confirmTrimMovie({tmdb}, \'{title_js}\', this)">Trim</button>'
             f'<button class="ignore" onclick="doIgnore({tmdb})">Ignore</button>'
@@ -867,7 +1094,7 @@ def build_movie_row(m, ignored=False):
     return (
         f'<tr><td><a class="movie-link" href="https://letterboxd.com/film/{slug}/" '
         f'target="_blank">{title}</a> <span class="year">({year})</span>'
-        f'{badge_new}{badge_src}{badge_watch}{badge_auto}</td>'
+        f'{badge_new}{badge_src}{badge_watch}{badge_rating}{badge_auto}</td>'
         f'<td class="size">{size} GB</td>'
         f'<td class="actions">{actions}</td></tr>'
     )
@@ -877,7 +1104,7 @@ IGNORED_SHOWS_FILE = DATA_DIR / "trimbin_ignored_shows.json"
 
 
 def build_show_row(s, ignored=False):
-    sonarr_url = get_sonarr_url()
+    sonarr_url = get_sonarr_browser_url()
     title = html.escape(s["title"])
     year = s.get("year", "?")
     size = s["size_gb"]
@@ -1370,6 +1597,116 @@ def trim_show(sonarr_id):
     return True, "ok"
 
 
+def _match_media_path(explorer_path, arr_path):
+    """Match explorer tree path to arr path, handling different mount prefixes.
+
+    Explorer uses /media/movies/Title while Radarr uses /movies/Title.
+    Also matches subdirectories: /media/tv/Show/Season 1 matches /tv/Show.
+    """
+    ep = explorer_path.rstrip("/")
+    ap = arr_path.rstrip("/")
+    if ep == ap or ep.startswith(ap + "/"):
+        return True
+    suffix = ap.lstrip("/")
+    if ep.endswith("/" + suffix) or ("/" + suffix + "/") in (ep + "/"):
+        return True
+    return False
+
+
+def explorer_lookup(path):
+    """Look up a media path in Radarr or Sonarr."""
+    radarr_url = get_radarr_url()
+    radarr_key = get_config("RADARR_API_KEY")
+    sonarr_url = get_sonarr_url()
+    sonarr_key = get_config("SONARR_API_KEY")
+
+    norm = path.rstrip("/")
+    if radarr_url and radarr_key:
+        try:
+            for m in (arr_api(radarr_url, radarr_key, "GET", "/movie") or []):
+                mp = (m.get("path") or "").rstrip("/")
+                if _match_media_path(norm, mp):
+                    return {
+                        "type": "movie", "id": m["id"],
+                        "title": m.get("title", "Unknown"),
+                        "tmdbId": m.get("tmdbId"),
+                        "qualityProfileId": m.get("qualityProfileId"),
+                        "sizeOnDisk": m.get("sizeOnDisk", 0),
+                    }
+        except Exception:
+            pass
+
+    if sonarr_url and sonarr_key:
+        try:
+            for s in (arr_api(sonarr_url, sonarr_key, "GET", "/series") or []):
+                sp = (s.get("path") or "").rstrip("/")
+                if _match_media_path(norm, sp):
+                    return {
+                        "type": "show", "id": s["id"],
+                        "title": s.get("title", "Unknown"),
+                        "tvdbId": s.get("tvdbId"),
+                        "qualityProfileId": s.get("qualityProfileId"),
+                        "sizeOnDisk": s.get("statistics", {}).get("sizeOnDisk", 0),
+                    }
+        except Exception:
+            pass
+
+    return {"error": "Not found in Radarr or Sonarr"}
+
+
+def get_quality_profiles():
+    """Fetch quality profiles from Radarr and Sonarr."""
+    result = {"radarr": [], "sonarr": []}
+    radarr_url = get_radarr_url()
+    radarr_key = get_config("RADARR_API_KEY")
+    sonarr_url = get_sonarr_url()
+    sonarr_key = get_config("SONARR_API_KEY")
+
+    if radarr_url and radarr_key:
+        try:
+            result["radarr"] = [{"id": p["id"], "name": p["name"]}
+                                for p in (arr_api(radarr_url, radarr_key, "GET", "/qualityprofile") or [])]
+        except Exception:
+            pass
+    if sonarr_url and sonarr_key:
+        try:
+            result["sonarr"] = [{"id": p["id"], "name": p["name"]}
+                                for p in (arr_api(sonarr_url, sonarr_key, "GET", "/qualityprofile") or [])]
+        except Exception:
+            pass
+    return result
+
+
+def set_quality_profile(media_type, media_id, quality_profile_id, search=False):
+    """Update quality profile for a movie or series, optionally trigger search."""
+    if media_type == "movie":
+        base_url, api_key = get_radarr_url(), get_config("RADARR_API_KEY")
+        endpoint = f"/movie/{media_id}"
+    elif media_type == "show":
+        base_url, api_key = get_sonarr_url(), get_config("SONARR_API_KEY")
+        endpoint = f"/series/{media_id}"
+    else:
+        return False, "Invalid type"
+
+    if not base_url or not api_key:
+        return False, "API not configured"
+
+    try:
+        item = arr_api(base_url, api_key, "GET", endpoint)
+        if not item:
+            return False, "Item not found"
+        item["qualityProfileId"] = quality_profile_id
+        arr_api(base_url, api_key, "PUT", endpoint, body=item)
+        if search:
+            cmd = "MoviesSearch" if media_type == "movie" else "SeriesSearch"
+            id_key = "movieIds" if media_type == "movie" else "seriesId"
+            body = {"name": cmd, id_key: [media_id] if media_type == "movie" else media_id}
+            arr_api(base_url, api_key, "POST", "/command", body=body)
+        return True, "ok"
+    except Exception as e:
+        return False, str(e)
+
+
 def resolve_path_hash(phash):
     """Find a filesystem path matching a hash across all scan results."""
     for scan_file in [DEDUP_FILE, TRICKPLAY_FILE]:
@@ -1394,17 +1731,71 @@ def delete_path(phash):
         return False, "Path not found in scan results"
     if not os.path.exists(target_path):
         return False, "Path no longer exists on disk"
-    if not any(target_path.startswith(p) for p in
-               [p.strip() for p in get_config("MEDIA_LIBRARIES").split(",") if p.strip()]):
+    # Containment check: resolve symlinks/.. and require the real path to sit
+    # *inside* a configured library. A plain startswith() is unsafe — it would
+    # authorize a sibling like /media/movies-4k against a /media/movies root.
+    real = os.path.realpath(target_path)
+    roots = [os.path.realpath(p.strip()) for p in get_config("MEDIA_LIBRARIES").split(",") if p.strip()]
+    if not roots:
+        return False, "No media libraries configured"
+    if not any(real == r or real.startswith(r + os.sep) for r in roots):
         return False, "Path is not under a configured media library"
     try:
-        if os.path.isdir(target_path):
+        if os.path.islink(target_path):
+            os.remove(target_path)              # remove the symlink itself, never its target
+        elif os.path.isdir(target_path):
             shutil.rmtree(target_path)
         else:
             os.remove(target_path)
     except Exception as e:
         return False, str(e)
+    _remove_deleted_from_scans(target_path)
     return True, "ok"
+
+
+def _remove_deleted_from_scans(deleted_path):
+    """Remove a deleted path from dedup/trickplay/cleanup scan JSONs."""
+    norm = deleted_path.rstrip("/")
+    dedup = load_json(DEDUP_FILE, {})
+    dupes = dedup.get("duplicates", [])
+    if dupes:
+        new_dupes = []
+        total_waste = 0
+        changed = False
+        for group in dupes:
+            entries = group.get("entries", [])
+            new_entries = [e for e in entries if e.get("path", "").rstrip("/") != norm]
+            if len(new_entries) < len(entries):
+                changed = True
+            if len(new_entries) >= 2:
+                new_entries.sort(key=lambda x: x.get("size_gb", 0), reverse=True)
+                waste = sum(e.get("size_gb", 0) for e in new_entries[1:])
+                group["entries"] = new_entries
+                group["copies"] = len(new_entries)
+                group["total_gb"] = round(sum(e.get("size_gb", 0) for e in new_entries), 1)
+                group["waste_gb"] = round(waste, 1)
+                total_waste += waste
+                new_dupes.append(group)
+        if changed:
+            dedup["duplicates"] = new_dupes
+            dedup["total_groups"] = len(new_dupes)
+            dedup["total_waste_gb"] = round(total_waste, 1)
+            save_json(DEDUP_FILE, dedup)
+    cleanup = load_json(CLEANUP_FILE, {})
+    items = cleanup.get("items", [])
+    if items:
+        new_items = [i for i in items if i.get("path", "").rstrip("/") != norm]
+        if len(new_items) < len(items):
+            cleanup["items"] = new_items
+            save_json(CLEANUP_FILE, cleanup)
+    trick = load_json(TRICKPLAY_FILE, {})
+    flagged = trick.get("flagged", [])
+    if flagged:
+        new_flagged = [f for f in flagged if f.get("path", "").rstrip("/") != norm]
+        if len(new_flagged) < len(flagged):
+            trick["flagged"] = new_flagged
+            trick["flagged_count"] = len(new_flagged)
+            save_json(TRICKPLAY_FILE, trick)
 
 
 def run_scan():
@@ -1488,7 +1879,9 @@ def build_explorer_html():
             '</div>'
         )
 
+    roots_json = json.dumps([p.strip().rstrip("/") for p in get_config("MEDIA_LIBRARIES").split(",") if p.strip()])
     return f"""{summary}
+<script>window.TRIMBIN_MEDIA_ROOTS = {roots_json};</script>
 <div class="explorer-wrap">
 <div class="breadcrumbs" id="explorer-breadcrumbs"></div>
 <div class="color-modes">
@@ -1673,7 +2066,7 @@ def ai_analyze_items(items):
         f"modified {time.strftime('%Y-%m-%d', time.localtime(it.get('mtime', 0)))} | "
         f"files: {it.get('files', '?')} | "
         f"types: {', '.join(f'{k}={v/(1024**3):.1f}GB' for k, v in (it.get('types') or {}).items())}"
-        for it in items[:20]
+        for it in items[:5]
     )
 
     system_prompt = """You are a media library curator helping a user decide what to delete from their personal media server to free up disk space. You analyze media items and provide keep/delete recommendations based on the user's taste profile.
@@ -1758,6 +2151,16 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/ai/profile":
             profile = compute_taste_profile()
             self._json_response({"ok": True, "profile": profile})
+        elif self.path.startswith("/api/explorer/lookup"):
+            parsed = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed.query)
+            path = params.get("path", [""])[0]
+            if not path:
+                self._json_response({"error": "Missing path parameter"})
+            else:
+                self._json_response(explorer_lookup(path))
+        elif self.path == "/api/explorer/quality-profiles":
+            self._json_response(get_quality_profiles())
         elif self.path == "/ping":
             self.send_response(200)
             self.end_headers()
@@ -1873,6 +2276,18 @@ class Handler(BaseHTTPRequestHandler):
                 ignored.add(key)
                 save_json(DEDUP_IGNORE_FILE, sorted(ignored))
             self._json_response({"ok": True})
+        elif self.path == "/api/explorer/set-quality":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            media_type = body.get("type", "")
+            media_id = body.get("id")
+            qp_id = body.get("qualityProfileId")
+            do_search = body.get("search", False)
+            if not media_type or media_id is None or qp_id is None:
+                self._json_response({"ok": False, "error": "Missing type, id, or qualityProfileId"})
+            else:
+                ok, msg = set_quality_profile(media_type, media_id, qp_id, search=do_search)
+                self._json_response({"ok": ok, "error": msg if not ok else None})
         else:
             self.send_response(404)
             self.end_headers()
@@ -1970,10 +2385,14 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+
+
 def serve():
     t = threading.Thread(target=digest_scheduler, daemon=True)
     t.start()
-    HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    ThreadedHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
 if __name__ == "__main__":

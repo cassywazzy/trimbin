@@ -14,6 +14,10 @@ Media cleanup tool for the *arr ecosystem. Monitors your watched lists across mu
 - **One-click trim** — delete files, unmonitor in Radarr/Sonarr, and purge the qBittorrent listing from the web UI (with confirmation dialog)
 - **Ignore list** — push movies to a greyed-out secondary list; restore them anytime
 - **Tabbed UI** — separate Movies and Shows tabs with progress bars for episode completion
+- **Storage Explorer** — zoomable D3 treemap + sortable tree list of your libraries, with By Size / Age / Type / AI views and optional local-LLM (Ollama) keep/delete recommendations
+- **Duplicate finder** — flags the same movie or series stored more than once (including the same show across `/tv` and `/anime`), with quality / codec / audio / size shown per copy
+- **Orphan & junk cleanup** — finds OS junk, empty dirs, scene/release leftovers, samples, and orphan sidecar files with a 3-tier safety model
+- **Trickplay scan** — flags oversized or video-containing `.trickplay` directories
 - **Discord digest** — weekly notification of newly watched media still on disk
 - **Status API** — JSON endpoint for dashboard widgets (Homepage, etc.)
 - **Trimmed counter** — tracks cumulative disk space reclaimed
@@ -58,13 +62,28 @@ The status server provides a dark-themed dashboard at port 5380:
 | POST | `/api/ignore/<tmdb_id>` | Add movie to ignore list |
 | POST | `/api/unignore/<tmdb_id>` | Remove movie from ignore list |
 | GET/POST | `/api/settings` | View/save integration settings |
+| POST | `/api/scan` | Run the watch-list scanner now |
+| POST | `/api/scan-dedup` · `/api/scan-trickplay` · `/api/scan-cleanup` · `/api/scan-tree` | Run a storage scan |
+| GET | `/api/tree` | Cached tree-scan data for the Explorer treemap |
+| GET | `/api/explorer/lookup?path=` · `/api/explorer/quality-profiles` | Resolve a path to Radarr/Sonarr · list quality profiles |
+| POST | `/api/explorer/set-quality` | Change a movie/show quality profile (optionally search) |
+| POST | `/api/delete-path/<hash>` | Delete a scanned file/dir (validated against `MEDIA_LIBRARIES`) |
+| POST | `/api/ai/analyze` | Ollama keep/delete recommendations for the current view |
+
+## Security
+
+Trimbin has **no built-in authentication**, and it can **delete files** (trim) and remove items from Radarr / Sonarr / qBittorrent. Treat it as an admin tool:
+
+- **Don't expose it directly to the internet.** Put it behind a reverse proxy with auth (Authentik/Authelia, basic auth, a VPN/overlay like Tailscale or NetBird), or keep it on a trusted LAN.
+- Deletions are guarded — a path is only removed if its resolved real path (symlinks and `..` resolved) is **inside** a configured `MEDIA_LIBRARIES` root, and symlinks are unlinked rather than followed — but still mount only the media you want Trimbin to manage.
+- Secrets live in `.env` / the in-volume `trimbin_config.json`, never in the image. The provided `.gitignore` keeps `.env` and state JSON out of version control.
 
 ## Setup
 
 ### Docker (recommended)
 
 ```bash
-git clone https://github.com/your-user/trimbin.git
+git clone https://github.com/cassywazzy/trimbin.git
 cd trimbin
 cp .env.example .env
 # Edit .env with your values
@@ -170,9 +189,14 @@ For [Homepage](https://gethomepage.dev/) (gethomepage):
 
 ## Roadmap
 
-- [x] Show ignore list (same pattern as movies)
+- [x] Show ignore list
+- [x] Storage Explorer with treemap + AI recommendations
+- [x] Cross-library duplicate detection (movies + TV/anime)
 - [ ] Multi-user awareness in show progress ("X of Y users have watched this")
-- [ ] Anime-specific tracking via AniList/MAL integration
+- [ ] MyAnimeList / AniList anime tracking (Fribb ID mapping for Sonarr cross-reference)
+- [ ] Plex support (Tautulli watch history)
+- [ ] Configurable show watch threshold (currently 75%)
+- [ ] Built-in scheduled scans (no external timer needed)
 
 ## License
 

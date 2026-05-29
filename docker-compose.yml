@@ -7,6 +7,11 @@ services:
       - "${PORT:-5380}:5380"
     volumes:
       - trimbin_data:/data
+      # Mount your media libraries so Trimbin can scan them and trim files.
+      # The in-container paths MUST match the paths you set in MEDIA_LIBRARIES.
+      # Read-write is needed for trim/delete; use :ro if you only want scans.
+      # Example — edit to match your setup:
+      # - /srv/media:/media
     env_file:
       - .env
 

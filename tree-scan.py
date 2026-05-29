@@ -7,7 +7,7 @@ import sys
 import time
 from pathlib import Path
 
-DATA_DIR = Path("/data")
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 CONFIG_FILE = DATA_DIR / "trimbin_config.json"
 TREE_FILE = DATA_DIR / "tree_scan.json"
 
@@ -136,10 +136,13 @@ def _dir_size(path):
 
 def main():
     config = {}
-    if CONFIG_FILE.exists():
+    try:
         config = json.loads(CONFIG_FILE.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
 
-    media_libs = config.get('MEDIA_LIBRARIES', '').split(',')
+    # config file first, then env fallback (so env-only / no-UI setups work too)
+    media_libs = (config.get('MEDIA_LIBRARIES') or os.environ.get('MEDIA_LIBRARIES', '')).split(',')
     media_libs = [p.strip() for p in media_libs if p.strip()]
 
     if not media_libs:

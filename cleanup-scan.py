@@ -234,12 +234,12 @@ def scan():
                             add_item("orphan_image", full, sz,
                                      f"{fn} in {os.path.basename(dirpath)}", library)
 
-            if has_video is False and dirpath != root and dirpath not in [i["path"] for i in items]:
+            if has_video is False and dirpath != root:
                 try:
-                    entries = os.listdir(dirpath)
+                    is_empty = (len(os.listdir(dirpath)) == 0)
                 except OSError:
-                    entries = []
-                if len(entries) == 0:
+                    is_empty = False  # unreadable dir — never treat as empty/deletable
+                if is_empty and not any(i["path"] == dirpath for i in items):
                     add_item("empty_dir", dirpath, 0,
                              os.path.basename(dirpath), library)
 
