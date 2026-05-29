@@ -35,6 +35,7 @@ Two components in one container:
 |--------|-----------------|------|
 | Letterboxd | Watched movies (scraped from profile) | Public profile, no key needed |
 | Simkl | Watched movies + shows + anime with episode-level progress | OAuth token (never expires) |
+| Trakt | Watched movies + shows (optional, activates only when configured) | API client ID + username |
 | Jellystat | Per-user watch counts ("3 of 4 users watched") | API token |
 | Jellyfin | TMDB-to-Jellyfin ID mapping (needed for Jellystat) | API key |
 

@@ -3,13 +3,15 @@
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-CONFIG_FILE = DATA_DIR / "trimbin_config.json"
+import trimbin_common as tc
+
+DATA_DIR = tc.DATA_DIR
 OUTPUT_FILE = DATA_DIR / "cleanup_scan.json"
 
-VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m2ts", ".ts", ".wmv", ".mov", ".flv", ".mpg", ".mpeg"}
+# The video set is shared (canonical). The sidecar/junk sets below stay local —
+# they decide what gets *flagged as deletable*, so they're behaviour-sensitive.
+VIDEO_EXTS = tc.VIDEO_EXTS
 SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub", ".idx", ".sup", ".vtt"}
 NFO_EXTS = {".nfo"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tbn"}
@@ -23,20 +25,8 @@ SCENE_JUNK_NAMES = {"rarbg.txt", "www.yify.txt", "etrg.txt", "read.me.txt",
                     "rarbg.com.txt", "rarbg_do_not_mirror.exe"}
 SAMPLE_PATTERN = "sample"
 
-
-def load_config():
-    try:
-        return json.loads(CONFIG_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def get_media_roots():
-    cfg = load_config()
-    paths = cfg.get("MEDIA_LIBRARIES", "")
-    if not paths:
-        return []
-    return [p.strip() for p in paths.split(",") if p.strip()]
+get_media_roots = tc.get_media_roots
+dir_size_bytes = tc.dir_size
 
 
 def dir_has_video(dirpath):
@@ -122,11 +112,11 @@ def scan():
     media_roots = get_media_roots()
     if not media_roots:
         print("No media libraries configured. Add them in Settings.")
-        OUTPUT_FILE.write_text(json.dumps({
+        tc.write_json_atomic(OUTPUT_FILE, {
             "last_scan": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
             "total_items": 0, "total_bytes": 0, "total_gb": 0,
             "by_category": {}, "items": [],
-        }))
+        })
         return
 
     _entry_has_video_cache.clear()
@@ -264,7 +254,7 @@ def scan():
         "items": items,
     }
 
-    OUTPUT_FILE.write_text(json.dumps(result, indent=2))
+    tc.write_json_atomic(OUTPUT_FILE, result)
     print(f"Found {len(items)} cleanup items, {result['total_gb']} GB reclaimable")
     for cat, info in by_category.items():
         print(f"  {cat}: {info['count']} items, {info['size_gb']} GB")

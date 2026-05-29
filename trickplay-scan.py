@@ -3,29 +3,16 @@
 import json
 import os
 from datetime import datetime, timezone
-from pathlib import Path
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-CONFIG_FILE = DATA_DIR / "trimbin_config.json"
+import trimbin_common as tc
+
+DATA_DIR = tc.DATA_DIR
 OUTPUT_FILE = str(DATA_DIR / "trickplay_scan.json")
 
-VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".m2ts", ".ts", ".wmv", ".mov", ".flv"}
+VIDEO_EXTS = tc.VIDEO_EXTS
 SIZE_THRESHOLD = 50 * 1024 * 1024
 
-
-def load_config():
-    try:
-        return json.loads(CONFIG_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def get_media_roots():
-    cfg = load_config()
-    paths = cfg.get("MEDIA_LIBRARIES", "")
-    if not paths:
-        return []
-    return [p.strip() for p in paths.split(",") if p.strip()]
+get_media_roots = tc.get_media_roots
 
 
 def scan_trickplay():
@@ -37,8 +24,7 @@ def scan_trickplay():
             "total_trickplay_dirs": 0, "total_trickplay_gb": 0,
             "flagged_count": 0, "flagged_gb": 0, "flagged": [],
         }
-        with open(OUTPUT_FILE, "w") as f:
-            json.dump(output, f, indent=2)
+        tc.write_json_atomic(OUTPUT_FILE, output)
         return output
 
     results = []
@@ -111,9 +97,7 @@ def scan_trickplay():
         "flagged": results,
     }
 
-    os.makedirs(os.path.dirname(OUTPUT_FILE), exist_ok=True)
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(output, f, indent=2)
+    tc.write_json_atomic(OUTPUT_FILE, output)
 
     return output
 

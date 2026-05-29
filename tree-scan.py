@@ -5,19 +5,19 @@ import json
 import os
 import sys
 import time
-from pathlib import Path
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
-CONFIG_FILE = DATA_DIR / "trimbin_config.json"
+import trimbin_common as tc
+
+DATA_DIR = tc.DATA_DIR
 TREE_FILE = DATA_DIR / "tree_scan.json"
 
-VIDEO_EXTS = {'.mkv', '.mp4', '.avi', '.wmv', '.flv', '.mov', '.m4v', '.webm',
-              '.ts', '.mpg', '.mpeg', '.m2ts', '.iso', '.bdmv', '.vob'}
-AUDIO_EXTS = {'.mp3', '.flac', '.ogg', '.opus', '.m4a', '.aac', '.wav', '.wma',
-              '.alac', '.ape', '.dsd', '.dsf', '.mka'}
-SUB_EXTS = {'.srt', '.ass', '.ssa', '.sub', '.idx', '.sup', '.vtt', '.pgs'}
-IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tbn'}
-META_EXTS = {'.nfo', '.xml', '.json', '.txt', '.url', '.website', '.lnk', '.log'}
+# Media-type classification sets are shared/canonical; junk + trickplay names
+# stay local to the tree scanner.
+VIDEO_EXTS = tc.VIDEO_EXTS
+AUDIO_EXTS = tc.AUDIO_EXTS
+SUB_EXTS = tc.SUB_EXTS
+IMAGE_EXTS = tc.IMAGE_EXTS
+META_EXTS = tc.META_EXTS
 JUNK_EXTS = {'.sfv', '.srr', '.torrent', '.exe', '.bat', '.cmd', '.com', '.msi',
              '.scr', '.ds_store', '.bts_search', '.part', '.!qb'}
 TRICKPLAY_NAMES = {'.trickplay', 'trickplay', '.bif'}
@@ -119,31 +119,11 @@ def scan_tree(root_path, max_depth=5):
     return scan_dir(root_path)
 
 
-def _dir_size(path):
-    """Fast recursive size without building tree."""
-    total = 0
-    try:
-        for dirpath, _, filenames in os.walk(path):
-            for f in filenames:
-                try:
-                    total += os.path.getsize(os.path.join(dirpath, f))
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return total
+_dir_size = tc.dir_size  # fast recursive size without building the tree
 
 
 def main():
-    config = {}
-    try:
-        config = json.loads(CONFIG_FILE.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
-
-    # config file first, then env fallback (so env-only / no-UI setups work too)
-    media_libs = (config.get('MEDIA_LIBRARIES') or os.environ.get('MEDIA_LIBRARIES', '')).split(',')
-    media_libs = [p.strip() for p in media_libs if p.strip()]
+    media_libs = tc.get_media_roots()  # config file first, then env fallback
 
     if not media_libs:
         print("ERROR: No MEDIA_LIBRARIES configured", file=sys.stderr)
@@ -186,7 +166,7 @@ def main():
         'total_dirs': root['dirs'],
     }
 
-    TREE_FILE.write_text(json.dumps(result))
+    tc.write_json_atomic(TREE_FILE, result, indent=None)
     print(f"Done: {root['files']} files, {root['dirs']} dirs, "
           f"{root['size'] / (1024**3):.1f} GB → {TREE_FILE}")
 

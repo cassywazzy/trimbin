@@ -13,6 +13,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -98,14 +99,29 @@ def http_get(url, timeout=30, referer=None, headers=None):
     return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", errors="replace")
 
 
-def api_json(url, timeout=30, headers=None, method="GET", body=None):
+def api_json(url, timeout=30, headers=None, method="GET", body=None, retries=2):
+    """JSON API call with retry/backoff on transient failures (5xx, timeouts,
+    connection errors). 4xx and other HTTP errors are raised immediately."""
     hdrs = {"Content-Type": "application/json"}
     if headers:
         hdrs.update(headers)
     data = json.dumps(body).encode() if body else None
-    req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
-    resp = urllib.request.urlopen(req, timeout=timeout)
-    return json.loads(resp.read())
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code >= 500 and attempt < retries:
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
+        except (urllib.error.URLError, TimeoutError, ValueError) as e:
+            if attempt < retries:
+                log.warning("api_json %s failed (%s), retrying", url, e)
+                time.sleep(2 * (attempt + 1))
+                continue
+            raise
 
 
 def ping_hc(suffix=""):
@@ -351,6 +367,38 @@ def _parse_simkl_shows(data, item_type="shows"):
     return shows
 
 
+def _merge_shows(base, extra):
+    """Merge `extra` shows into `base`, keeping whichever record has more watched episodes."""
+    for tvdb, rec in extra.items():
+        cur = base.get(tvdb)
+        if not cur or rec.get("total_watched_eps", 0) > cur.get("total_watched_eps", 0):
+            base[tvdb] = rec
+    return base
+
+
+def _simkl_initial_sync():
+    """Phase 1 full sync: fetch each type, write cache + activity timestamps, return movies."""
+    log.info("simkl: initial sync (Phase 1)")
+    movies = _parse_simkl_movies(simkl_get("/sync/all-items/movies/completed") or {})
+    time.sleep(1)
+    shows = _parse_simkl_shows(simkl_get("/sync/all-items/shows/completed?extended=full") or {}, "shows")
+    time.sleep(1)
+    _merge_shows(shows, _parse_simkl_shows(simkl_get("/sync/all-items/anime/completed?extended=full") or {}, "anime"))
+
+    save_json(SIMKL_CACHE_FILE, {"movies": {str(k): v for k, v in movies.items()},
+                                 "shows": {str(k): v for k, v in shows.items()}})
+
+    activity = _simkl_fetch_activities()
+    saved = {"initialized": True}
+    for cat in ("movies", "shows", "anime"):
+        cat_data = activity.get(cat, {})
+        saved[f"{cat}_watched_at"] = cat_data.get("watched_at") or cat_data.get("all") or ""
+    save_json(SIMKL_ACTIVITY_FILE, saved)
+
+    log.info("simkl initial: %d movies, %d shows", len(movies), len(shows))
+    return movies
+
+
 def fetch_simkl_movies():
     if not SIMKL_CLIENT_ID or not SIMKL_TOKEN:
         log.info("SIMKL_CLIENT_ID/SIMKL_ACCESS_TOKEN not set, skipping Simkl")
@@ -358,34 +406,9 @@ def fetch_simkl_movies():
 
     saved = load_json(SIMKL_ACTIVITY_FILE, {})
     cache = load_json(SIMKL_CACHE_FILE, {"movies": {}, "shows": {}})
-    is_initial = not saved.get("initialized")
 
-    if is_initial:
-        # Phase 1: fetch each type separately, sequentially
-        log.info("simkl: initial sync (Phase 1)")
-        data = simkl_get("/sync/all-items/movies/completed")
-        movies = _parse_simkl_movies(data or {})
-        time.sleep(1)
-        data = simkl_get("/sync/all-items/shows/completed?extended=full")
-        shows = _parse_simkl_shows(data or {}, "shows")
-        time.sleep(1)
-        data = simkl_get("/sync/all-items/anime/completed?extended=full")
-        anime_shows = _parse_simkl_shows(data or {}, "anime")
-        shows.update(anime_shows)
-
-        cache = {"movies": {str(k): v for k, v in movies.items()},
-                 "shows": {str(k): v for k, v in shows.items()}}
-        save_json(SIMKL_CACHE_FILE, cache)
-
-        activity = _simkl_fetch_activities()
-        saved = {"initialized": True}
-        for cat in ("movies", "shows", "anime"):
-            cat_data = activity.get(cat, {})
-            saved[f"{cat}_watched_at"] = cat_data.get("watched_at") or cat_data.get("all") or ""
-        save_json(SIMKL_ACTIVITY_FILE, saved)
-
-        log.info("simkl initial: %d movies, %d shows", len(movies), len(shows))
-        return movies
+    if not saved.get("initialized"):
+        return _simkl_initial_sync()
 
     # Phase 2: check activity, delta sync if changed
     activity = _simkl_fetch_activities()
@@ -396,17 +419,15 @@ def fetch_simkl_movies():
     date_from = saved.get("movies_watched_at") or saved.get("shows_watched_at") or ""
     if not date_from:
         log.info("simkl: no saved timestamp, falling back to initial sync")
-        saved.pop("initialized", None)
-        save_json(SIMKL_ACTIVITY_FILE, saved)
-        return fetch_simkl_movies()
+        return _simkl_initial_sync()
 
     log.info("simkl: delta sync from %s", date_from)
-    data = simkl_get(f"/sync/all-items/?date_from={date_from}&extended=full")
+    data = simkl_get(f"/sync/all-items/?date_from={urllib.parse.quote(date_from)}&extended=full")
 
     delta_movies = _parse_simkl_movies(data or {})
     delta_shows = _parse_simkl_shows(data or {}, "shows")
     delta_anime = _parse_simkl_shows(data or {}, "anime")
-    delta_shows.update(delta_anime)
+    _merge_shows(delta_shows, delta_anime)
 
     # Merge into cache
     for k, v in delta_movies.items():
@@ -486,8 +507,8 @@ def _fetch_trakt_shows():
             snum = season["number"]
             watched_eps[snum] = len(season.get("episodes", []))
         shows[tvdb] = {
-            "title": item["show"]["title"],
-            "year": item["show"].get("year"),
+            "title": item.get("show", {}).get("title", ""),
+            "year": item.get("show", {}).get("year"),
             "tmdb": ids.get("tmdb"),
             "watched_seasons": watched_eps,
             "total_watched_eps": sum(watched_eps.values()),
@@ -554,9 +575,8 @@ def jellyfin_lookup_by_tmdb(tmdb_id):
         return None
     try:
         url = (f"{JELLYFIN_URL}/Items?hasTmdbId=true"
-               f"&fields=ProviderIds&recursive=true&includeItemTypes=Movie"
-               f"&api_key={JELLYFIN_API_KEY}")
-        data = api_json(url)
+               f"&fields=ProviderIds&recursive=true&includeItemTypes=Movie")
+        data = api_json(url, headers={"X-Emby-Token": JELLYFIN_API_KEY})
         for item in data.get("Items", []):
             pids = item.get("ProviderIds", {})
             if str(pids.get("Tmdb", "")) == str(tmdb_id):
@@ -606,9 +626,12 @@ def get_sonarr_library():
     )
     shows = {}
     for s in data:
+        tvdb = s.get("tvdbId")
+        if not tvdb:
+            continue  # unmatched series — don't collapse them all under key 0
         stats = s.get("statistics", {})
         if stats.get("episodeFileCount", 0) > 0:
-            shows[s.get("tvdbId", 0)] = {
+            shows[tvdb] = {
                 "title": s["title"],
                 "year": s.get("year", ""),
                 "size_gb": round(stats.get("sizeOnDisk", 0) / (1024 ** 3), 1),
@@ -633,9 +656,7 @@ def post_discord(content):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    ping_hc("start")
-
+def _scan():
     # Read auto-ignore settings early so we only scrape likes if needed
     auto_ignore_liked = _cfg("LB_AUTO_IGNORE_LIKED").lower() in ("true", "1", "yes", "on")
     min_rating_str = _cfg("LB_MIN_RATING_IGNORE")
@@ -652,11 +673,11 @@ def main():
     lb_watched, lb_ratings = scrape_letterboxd_movies()
     lb_likes = scrape_letterboxd_likes() if auto_ignore_liked else set()
     simkl_watched = fetch_simkl_movies()
+    trakt_watched = _fetch_trakt_movies()  # no-op unless TRAKT_CLIENT_ID + TRAKT_USERNAME are set
 
-    all_watched_tmdb = set(lb_watched.keys()) | set(simkl_watched.keys())
-    log.info("total unique watched movies: %d (LB=%d, Simkl=%d, overlap=%d)",
-             len(all_watched_tmdb), len(lb_watched), len(simkl_watched),
-             len(set(lb_watched) & set(simkl_watched)))
+    all_watched_tmdb = set(lb_watched.keys()) | set(simkl_watched.keys()) | set(trakt_watched.keys())
+    log.info("total unique watched movies: %d (LB=%d, Simkl=%d, Trakt=%d)",
+             len(all_watched_tmdb), len(lb_watched), len(simkl_watched), len(trakt_watched))
 
     if not all_watched_tmdb and LB_USER:
         log.error("no watched films found from any source, aborting")
@@ -680,6 +701,8 @@ def main():
                 sources.append("letterboxd")
             if tmdb_id in simkl_watched:
                 sources.append("simkl")
+            if tmdb_id in trakt_watched:
+                sources.append("trakt")
 
             watch_count, watched_by = 0, []
             if JELLYSTAT_URL:
@@ -748,6 +771,7 @@ def main():
 
     # ---- Shows ----
     simkl_shows = fetch_simkl_shows()
+    _merge_shows(simkl_shows, _fetch_trakt_shows())  # Trakt shows — no-op without TRAKT creds
     sonarr = get_sonarr_library()
     log.info("sonarr: %d shows with files on disk", len(sonarr))
 
@@ -844,6 +868,16 @@ def write_status(movie_count, movie_gb, new_count, new_gb, show_count=0, show_gb
         "shows_gb": round(show_gb),
         "last_run": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     })
+
+
+def main():
+    ping_hc("start")
+    try:
+        _scan()
+    except Exception:
+        log.exception("trimbin scan failed")
+        ping_hc("fail")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
