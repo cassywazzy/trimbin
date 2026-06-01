@@ -17,6 +17,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+import trimbin_common as tc  # for live scan-progress reporting
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 CONFIG_FILE = DATA_DIR / "trimbin_config.json"
 OUTPUT_FILE = DATA_DIR / "dedup_scan.json"
@@ -404,12 +406,22 @@ def scan():
 
     groups = defaultdict(list)
     series_entries = []
+    entries_seen = 0
+    total_entries = 0
+    for _r in media_roots:
+        try:
+            total_entries += len(os.listdir(_r))
+        except OSError:
+            pass
 
     for root in media_roots:
         if not os.path.isdir(root):
             continue
         library = os.path.basename(root)
         for entry in sorted(os.listdir(root)):
+            entries_seen += 1
+            tc.progress("dedup", done=entries_seen, total=total_entries,
+                        current=os.path.join(root, entry))
             full_path = os.path.join(root, entry)
             if not os.path.isdir(full_path):
                 continue
@@ -477,6 +489,8 @@ def scan():
                 "library": library,
             })
 
+    tc.progress("dedup", done=entries_seen, total=total_entries,
+                phase="cross-referencing Radarr/Sonarr", force=True)
     # Cross-reference with Radarr to catch cross-language/cross-title duplicates
     all_entries = []
     for entries_list in groups.values():
@@ -626,6 +640,7 @@ def scan():
     }
 
     OUTPUT_FILE.write_text(json.dumps(result, indent=2))
+    tc.progress_done("dedup")
     print(f"Found {len(duplicates)} duplicate groups, {total_waste_gb:.1f} GB potential waste")
 
 

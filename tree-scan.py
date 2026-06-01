@@ -11,6 +11,9 @@ import trimbin_common as tc
 DATA_DIR = tc.DATA_DIR
 TREE_FILE = DATA_DIR / "tree_scan.json"
 
+_scanned = [0]      # dirs visited this run (for the live progress counter)
+_total_est = [0]    # dir-count estimate from the last scan (for the progress bar)
+
 # Media-type classification sets are shared/canonical; junk + trickplay names
 # stay local to the tree scanner.
 VIDEO_EXTS = tc.VIDEO_EXTS
@@ -53,6 +56,8 @@ def is_trickplay_dir(name):
 def scan_tree(root_path, max_depth=5):
     """Recursively scan directory tree, returning nested structure."""
     def scan_dir(path, depth=0):
+        _scanned[0] += 1
+        tc.progress("tree", done=_scanned[0], total=_total_est[0], current=path)
         node = {
             'name': os.path.basename(path) or path,
             'path': path,
@@ -131,6 +136,12 @@ def main():
 
     print(f"Scanning {len(media_libs)} libraries...")
 
+    try:
+        _total_est[0] = json.loads(TREE_FILE.read_text()).get("total_dirs", 0)
+    except Exception:
+        _total_est[0] = 0
+    _scanned[0] = 0
+
     root = {
         'name': 'Media Libraries',
         'path': '/',
@@ -167,6 +178,7 @@ def main():
     }
 
     tc.write_json_atomic(TREE_FILE, result, indent=None)
+    tc.progress_done("tree")
     print(f"Done: {root['files']} files, {root['dirs']} dirs, "
           f"{root['size'] / (1024**3):.1f} GB → {TREE_FILE}")
 

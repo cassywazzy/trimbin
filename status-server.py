@@ -27,6 +27,7 @@ AUTO_IGNORED_FILE = DATA_DIR / "trimbin_auto_ignored.json"
 CONFIG_FILE = DATA_DIR / "trimbin_config.json"
 TREE_FILE = DATA_DIR / "tree_scan.json"
 TASTE_FILE = DATA_DIR / "taste_profile.json"
+PROGRESS_FILE = DATA_DIR / "scan_progress.json"
 PORT = int(os.environ.get("PORT", "5380"))
 
 CONFIG_KEYS = [
@@ -56,6 +57,8 @@ CONFIG_KEYS = [
     ("TDARR_URL", "Tdarr API URL (container-reachable, e.g. http://tdarr-host:8265)", "tdarr"),
     ("TDARR_BROWSER_URL", "Tdarr browser URL (for the UI link, e.g. https://tdarr.example.com)", "tdarr"),
     ("NETDATA_URL", "Netdata URL (optional — raw pool stats enrichment)", "scans"),
+    ("AUTO_SCAN_TIME", "Auto-scan daily at HH:MM, 24h (blank = off)", "scans"),
+    ("AUTO_SCAN_STORAGE", "Auto-scan also runs storage scans (true/false)", "scans"),
     ("GITHUB_REPO", "GitHub repo for update checks (owner/name)", "about"),
 ]
 
@@ -77,6 +80,16 @@ def save_json(path, data):
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
     tmp.replace(path)
+
+
+def _progress_start(scan_type):
+    """Bracket the start of a scan so the UI shows progress immediately."""
+    save_json(PROGRESS_FILE, {"active": True, "type": scan_type, "phase": "starting",
+                              "done": 0, "total": 0, "current": "", "updated": time.time()})
+
+
+def _progress_done(scan_type):
+    save_json(PROGRESS_FILE, {"active": False, "type": scan_type, "updated": time.time()})
 
 
 def get_config(key):
@@ -156,6 +169,32 @@ def digest_scheduler():
             if now.hour == h and now.minute == m and last_posted_date != today_str:
                 post_daily_digest()
                 last_posted_date = today_str
+        except Exception:
+            pass
+        threading.Event().wait(30)
+
+
+def auto_scan_scheduler():
+    """Optional nightly auto-scan (a user's 'watched folder' request). Runs the
+    watch-list scan at AUTO_SCAN_TIME each day; also runs the storage scans when
+    AUTO_SCAN_STORAGE is enabled. Off entirely unless AUTO_SCAN_TIME is set —
+    kept conservative because the storage scans are I/O-heavy on a full pool."""
+    last_run_date = None
+    while True:
+        try:
+            t = get_config("AUTO_SCAN_TIME")
+            if t and ":" in t:
+                h, m = (int(x) for x in t.split(":"))
+                now = datetime.now()
+                today = now.strftime("%Y-%m-%d")
+                if now.hour == h and now.minute == m and last_run_date != today:
+                    last_run_date = today
+                    run_scan()
+                    if str(get_config("AUTO_SCAN_STORAGE")).strip().lower() in ("true", "1", "yes", "on"):
+                        run_dedup_scan()
+                        run_trickplay_scan()
+                        run_cleanup_scan()
+                        run_tree_scan()
         except Exception:
             pass
         threading.Event().wait(30)
@@ -312,6 +351,15 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 .tdarr-card .label{font-size:.75em;color:#888;margin-top:4px}
 .tdarr-offline{background:#e9456022;border:1px solid #e9456044;color:#e94560;padding:8px 14px;border-radius:6px;font-size:.82em;margin-bottom:12px}
 .tdarr-warn{background:#f39c1211;border:1px solid #f39c1233;color:#f39c12;padding:8px 14px;border-radius:6px;font-size:.78em;margin-bottom:12px;white-space:pre-line}
+.scan-panel{display:none;position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:14px 18px;z-index:150;min-width:340px;max-width:90vw;box-shadow:0 4px 20px rgba(0,0,0,.6)}
+.scan-panel.active{display:block}
+.scan-panel .sp-title{font-size:.85em;color:#00d474;font-weight:600;margin-bottom:8px;display:flex;justify-content:space-between;gap:12px}
+.scan-panel .sp-count{color:#888;font-weight:400;white-space:nowrap}
+.scan-track{height:10px;background:#0d1b2a;border-radius:5px;overflow:hidden;border:1px solid #0f3460}
+.scan-fill{height:100%;background:#00d474;border-radius:5px;transition:width .3s;width:0}
+.scan-fill.indet{width:35%;animation:indet 1.1s ease-in-out infinite}
+@keyframes indet{0%{margin-left:-35%}100%{margin-left:100%}}
+.scan-panel .sp-current{font-size:.72em;color:#666;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
 @media(max-width:600px){
   .summary{gap:8px}
   .stat{padding:10px 6px;min-width:70px}
@@ -420,6 +468,11 @@ $settings_html
 </div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="scan-panel" id="scanPanel">
+<div class="sp-title"><span id="sp-label">Scanning&hellip;</span><span class="sp-count" id="sp-count"></span></div>
+<div class="scan-track"><div class="scan-fill" id="sp-fill"></div></div>
+<div class="sp-current" id="sp-current"></div>
+</div>
 
 <script>
 let pendingUrl = null;
@@ -544,13 +597,15 @@ function saveSettings() {
 function runScan(btn) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spin">&#x21bb;</span> Scanning...';
+  startScanProgress('main');
   fetch('/api/scan', {method: 'POST'})
     .then(r => r.json())
     .then(d => {
+      stopScanProgress();
       if (d.ok) { showToast('Scan complete'); setTimeout(() => location.reload(), 800); }
       else { showToast('Scan error: ' + (d.error || 'unknown')); btn.disabled = false; btn.textContent = 'Scan'; }
     })
-    .catch(e => { showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
+    .catch(e => { stopScanProgress(); showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
 }
 
 function confirmDeletePath(pathHash, label, btn) {
@@ -580,15 +635,17 @@ function doIgnoreDedup(groupKey) {
 function runStorageScan(type, btn) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spin">&#x21bb;</span> Scanning...';
+  startScanProgress(type);
   var tabMap = {dedup: 'duplicates', trickplay: 'trickplay', cleanup: 'cleanup'};
   var tab = tabMap[type] || type;
   fetch('/api/scan-' + type, {method: 'POST'})
     .then(r => r.json())
     .then(d => {
+      stopScanProgress();
       if (d.ok) { showToast('Scan complete'); reloadToTab(tab); }
       else { showToast('Scan error: ' + (d.error || 'unknown')); btn.disabled = false; btn.textContent = 'Scan'; }
     })
-    .catch(e => { showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
+    .catch(e => { stopScanProgress(); showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
 }
 
 function showToast(msg) {
@@ -596,6 +653,46 @@ function showToast(msg) {
   t.textContent = msg;
   t.style.display = 'block';
   setTimeout(function(){ t.style.display = 'none'; }, 3000);
+}
+
+/* === Live scan progress (polls /api/scan-progress so long scans aren't a dead spinner) === */
+var scanPoll = null;
+var SCAN_LABELS = {tree: 'Storage Explorer scan', dedup: 'Duplicate scan', trickplay: 'Trickplay scan', cleanup: 'Cleanup scan', main: 'Library scan'};
+function setScanProgress(p) {
+  var label = document.getElementById('sp-label');
+  var count = document.getElementById('sp-count');
+  var fill = document.getElementById('sp-fill');
+  var cur = document.getElementById('sp-current');
+  if (!label) return;
+  label.textContent = SCAN_LABELS[p.type] || 'Scanning…';
+  var phase = (p.phase && p.phase !== 'scanning') ? p.phase : '';
+  if (p.total && p.total > 0) {
+    var pct = Math.min(100, Math.round((p.done || 0) / p.total * 100));
+    fill.className = 'scan-fill';
+    fill.style.width = pct + '%';
+    count.textContent = (phase ? phase + ' · ' : '') + (p.done || 0).toLocaleString() + ' / ' + Number(p.total).toLocaleString() + ' (' + pct + '%)';
+  } else {
+    fill.className = 'scan-fill indet';
+    fill.style.width = '35%';
+    count.textContent = phase || ((p.done || 0) > 0 ? Number(p.done).toLocaleString() + ' scanned' : 'working…');
+  }
+  cur.textContent = p.current || '';
+}
+function startScanProgress(type) {
+  var panel = document.getElementById('scanPanel');
+  if (panel) panel.classList.add('active');
+  setScanProgress({active: true, type: type, phase: 'starting'});
+  if (scanPoll) clearInterval(scanPoll);
+  scanPoll = setInterval(function() {
+    fetch('/api/scan-progress').then(function(r){ return r.json(); }).then(function(p) {
+      if (p && p.active) setScanProgress(p);
+    }).catch(function(){});
+  }, 700);
+}
+function stopScanProgress() {
+  if (scanPoll) { clearInterval(scanPoll); scanPoll = null; }
+  var panel = document.getElementById('scanPanel');
+  if (panel) panel.classList.remove('active');
 }
 
 /* === Explorer: D3 Treemap + Tree List + AI === */
@@ -914,13 +1011,15 @@ function setColorMode(mode) {
 function runTreeScan(btn) {
   btn.disabled = true;
   btn.innerHTML = '<span class="spin">&#x21bb;</span> Scanning...';
+  startScanProgress('tree');
   fetch('/api/scan-tree', {method: 'POST'})
     .then(function(r){ return r.json(); })
     .then(function(d) {
+      stopScanProgress();
       if (d.ok) { showToast('Tree scan complete'); setTimeout(function(){ reloadToTab('explorer'); }, 800); }
       else { showToast('Error: ' + (d.error || 'unknown')); btn.disabled = false; btn.textContent = 'Scan'; }
     })
-    .catch(function(e) { showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
+    .catch(function(e) { stopScanProgress(); showToast('Error: ' + e); btn.disabled = false; btn.textContent = 'Scan'; });
 }
 
 function explorerAiAnalyze() {
@@ -1023,21 +1122,33 @@ function explorerTrim(idx) {
   explorerTrimByPath(c.path || '', c.name, c);
 }
 
-// Action menu for a media entry (opened from a treemap cell): Quality / Trim / Delete.
+// Action menu for a media entry (opened from a treemap cell). Looks the item up
+// in Radarr/Sonarr first and offers only the action that fits:
+//   managed   -> Change quality profile + Trim (removes from *arr, won't re-download)
+//   unmanaged -> Delete from disk (raw filesystem delete; *arr never knew about it)
 function openActionMenu(path, name, node, x, y) {
   var old = document.getElementById('action-menu');
   if (old) old.remove();
   var m = document.createElement('div');
   m.id = 'action-menu';
-  m.style.cssText = 'position:fixed;background:#16213e;border:1px solid #0f3460;border-radius:6px;padding:4px 0;z-index:999;min-width:200px;box-shadow:0 4px 16px rgba(0,0,0,.6)';
-  m.style.left = Math.max(4, Math.min(x, window.innerWidth - 210)) + 'px';
-  m.style.top = Math.max(4, Math.min(y, window.innerHeight - 170)) + 'px';
+  m.style.cssText = 'position:fixed;background:#16213e;border:1px solid #0f3460;border-radius:6px;padding:4px 0;z-index:999;min-width:230px;box-shadow:0 4px 16px rgba(0,0,0,.6)';
+  m.style.left = Math.max(4, Math.min(x, window.innerWidth - 240)) + 'px';
+  m.style.top = Math.max(4, Math.min(y, window.innerHeight - 190)) + 'px';
   var hdr = document.createElement('div');
-  hdr.style.cssText = 'padding:6px 12px;font-size:.75em;color:#888;border-bottom:1px solid #0f3460;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px';
+  hdr.style.cssText = 'padding:6px 12px;font-size:.75em;color:#888;border-bottom:1px solid #0f3460;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:300px';
   hdr.textContent = name;
   m.appendChild(hdr);
+  var bodyEl = document.createElement('div');
+  bodyEl.innerHTML = '<div style="padding:8px 12px;font-size:.8em;color:#888">Checking Radarr/Sonarr…</div>';
+  m.appendChild(bodyEl);
   function close() { m.remove(); document.removeEventListener('click', onOut); }
   function onOut(ev) { if (!m.contains(ev.target)) close(); }
+  function sub(text, color) {
+    var s = document.createElement('div');
+    s.style.cssText = 'padding:4px 12px 2px;font-size:.72em;color:' + color;
+    s.textContent = text;
+    bodyEl.appendChild(s);
+  }
   function addItem(label, color, fn) {
     var it = document.createElement('div');
     it.style.cssText = 'padding:8px 12px;cursor:pointer;font-size:.82em;color:' + color;
@@ -1045,19 +1156,31 @@ function openActionMenu(path, name, node, x, y) {
     it.onmouseover = function() { this.style.background = '#1e2d4a'; };
     it.onmouseout = function() { this.style.background = 'transparent'; };
     it.onclick = function() { close(); fn(); };
-    m.appendChild(it);
+    bodyEl.appendChild(it);
   }
-  addItem('Change quality profile', '#ccc', function() {
-    openQualityDropdown(path, {top: y, bottom: y, right: x + 200}, null);
-  });
-  addItem('Trim (delete + remove from *arr)', '#e94560', function() {
-    if (confirm('Trim "' + name + '"?\\nThis deletes files and removes it from Radarr/Sonarr.')) explorerTrimByPath(path, name, node);
-  });
-  addItem('Delete from disk', '#e94560', function() {
-    if (confirm('Permanently delete "' + name + '" from disk? This cannot be undone.')) explorerDeleteFromDisk(path, name, node);
-  });
   document.body.appendChild(m);
   setTimeout(function() { document.addEventListener('click', onOut); }, 0);
+  fetch('/api/explorer/lookup?path=' + encodeURIComponent(path)).then(function(r) { return r.json(); }).then(function(d) {
+    bodyEl.innerHTML = '';
+    if (d && !d.error) {
+      var kind = d.type === 'movie' ? 'Radarr' : 'Sonarr';
+      sub('In ' + kind + ': ' + (d.title || ''), '#00d474');
+      addItem('Change quality profile', '#ccc', function() { openQualityDropdown(path, {top: y, bottom: y, right: x + 200}, null); });
+      addItem('Trim — delete files + remove from ' + kind, '#e94560', function() {
+        if (confirm('Trim "' + name + '"?\\nDeletes the files AND removes it from ' + kind + ', so it won\\'t be re-downloaded.')) explorerTrimByPath(path, name, node);
+      });
+    } else {
+      sub('Not tracked by Radarr/Sonarr', '#888');
+      addItem('Delete from disk', '#e94560', function() {
+        if (confirm('Permanently delete "' + name + '" from disk? This cannot be undone.\\n(Not managed by Radarr/Sonarr.)')) explorerDeleteFromDisk(path, name, node);
+      });
+    }
+  }).catch(function() {
+    bodyEl.innerHTML = '';
+    addItem('Delete from disk', '#e94560', function() {
+      if (confirm('Permanently delete "' + name + '" from disk? This cannot be undone.')) explorerDeleteFromDisk(path, name, node);
+    });
+  });
 }
 
 function explorerQuality(btn, idx) {
@@ -1212,24 +1335,25 @@ function renderTdarr(d) {
   } else if (status) { status.textContent = 'synced ' + (d.synced_at || ''); }
   html += '<div class="tdarr-cards">'
     + '<div class="tdarr-card"><div class="value">' + (d.gb_saved != null ? d.gb_saved + ' GB' : '—') + '</div><div class="label">Space saved</div></div>'
-    + '<div class="tdarr-card"><div class="value">' + (d.transcodes != null ? d.transcodes : '—') + '</div><div class="label">Transcodes</div></div>'
+    + '<div class="tdarr-card"><div class="value">' + (d.transcodes != null ? d.transcodes : '—') + '</div><div class="label">Transcode events</div></div>'
     + '<div class="tdarr-card"><div class="value">' + (d.files != null ? Number(d.files).toLocaleString() : '—') + '</div><div class="label">Files tracked</div></div>'
     + '<div class="tdarr-card"><div class="value">' + (d.health_checks != null ? Number(d.health_checks).toLocaleString() : '—') + '</div><div class="label">Health checks</div></div>'
     + '</div>';
+  if (d.note) { html += '<div class="tdarr-warn" style="color:#9bb;border-color:#0f3460;background:#0f346033">' + escHtml(d.note) + '</div>'; }
   if (d.warning) { html += '<div class="tdarr-warn">' + escHtml(d.warning) + '</div>'; }
-  var recent = d.recent || [];
-  if (recent.length) {
-    html += '<h2 style="font-size:1em;color:#ccc;border:none;margin:18px 0 8px">Recent transcodes</h2>';
-    html += '<table><thead><tr><th>When</th><th>Library</th><th>Saved</th></tr></thead><tbody>';
-    recent.slice(0, 30).forEach(function(e) {
-      html += '<tr><td>' + escHtml(fmtTs(e.ts)) + '</td><td>' + escHtml(e.library || '?') + '</td>'
+  var bl = d.by_library || [];
+  if (bl.length) {
+    html += '<h2 style="font-size:1em;color:#ccc;border:none;margin:18px 0 8px">Savings by library</h2>';
+    html += '<table><thead><tr><th>Library</th><th>Transcode events</th><th>Saved</th></tr></thead><tbody>';
+    bl.forEach(function(e) {
+      html += '<tr><td>' + escHtml(e.library || '?') + '</td><td>' + (e.events != null ? e.events : '') + '</td>'
         + '<td class="size">' + (e.saved_gb != null ? Number(e.saved_gb).toFixed(2) + ' GB' : '') + '</td></tr>';
     });
     html += '</tbody></table>';
   }
   html += '<p style="font-size:.75em;color:#666;margin-top:12px">';
   if (d.browser_url) { html += '<a class="arr-link" href="' + (d.browser_url || '').replace(/"/g, '%22') + '" target="_blank" rel="noopener">Open Tdarr</a> '; }
-  html += 'Recent-transcode events are from Tdarr\\'s last full sync.</p>';
+  html += 'Tdarr\\'s log records space saved per transcode but <b>not the filename</b>, and its per-file database is currently empty &mdash; a per-file list will populate here once Tdarr is transcoding in production.</p>';
   body.innerHTML = html;
 }
 function loadTdarr(btn) {
@@ -1903,7 +2027,7 @@ def get_quality_profiles():
     return result
 
 
-TRIMBIN_VERSION = "2.6"  # bump on release; compared against GitHub for the update badge
+TRIMBIN_VERSION = "2.7"  # bump on release; compared against GitHub for the update badge
 VERSION_CACHE_FILE = DATA_DIR / "version_check.json"
 TDARR_CACHE_FILE = DATA_DIR / "tdarr_stats.json"
 
@@ -2049,6 +2173,8 @@ def tdarr_stats():
             "score": doc.get("tdarrScore", 0),
             "warning": (doc.get("processWarning") or "").strip(),
             "recent": cached.get("recent", []),
+            "by_library": cached.get("by_library", []),
+            "note": cached.get("note", ""),
             "browser_url": browser,
         }
         save_json(TDARR_CACHE_FILE, out)
@@ -2212,56 +2338,36 @@ def delete_explorer_path(target_path):
     return True, "ok"
 
 
-def run_scan():
+def _run_scanner(scan_type, script, timeout):
+    """Run a scanner subprocess bracketed with scan-progress start/done, so the
+    UI can poll /api/scan-progress and show a live bar instead of a dead spinner.
+    progress_done in finally guarantees the bar clears even if the scanner crashes."""
+    _progress_start(scan_type)
     try:
-        result = subprocess.run(
-            ["python3", "/app/cleanup-notify.py"],
-            capture_output=True, text=True, timeout=600,
-        )
+        result = subprocess.run(["python3", script], capture_output=True, text=True, timeout=timeout)
         return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
     except subprocess.TimeoutExpired:
         return False, "scan timed out"
     except Exception as e:
         return False, str(e)
+    finally:
+        _progress_done(scan_type)
+
+
+def run_scan():
+    return _run_scanner("main", "/app/cleanup-notify.py", 600)
 
 
 def run_dedup_scan():
-    try:
-        result = subprocess.run(
-            ["python3", "/app/dedup-scan.py"],
-            capture_output=True, text=True, timeout=300,
-        )
-        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
-    except subprocess.TimeoutExpired:
-        return False, "scan timed out"
-    except Exception as e:
-        return False, str(e)
+    return _run_scanner("dedup", "/app/dedup-scan.py", 300)
 
 
 def run_trickplay_scan():
-    try:
-        result = subprocess.run(
-            ["python3", "/app/trickplay-scan.py"],
-            capture_output=True, text=True, timeout=300,
-        )
-        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
-    except subprocess.TimeoutExpired:
-        return False, "scan timed out"
-    except Exception as e:
-        return False, str(e)
+    return _run_scanner("trickplay", "/app/trickplay-scan.py", 300)
 
 
 def run_cleanup_scan():
-    try:
-        result = subprocess.run(
-            ["python3", "/app/cleanup-scan.py"],
-            capture_output=True, text=True, timeout=300,
-        )
-        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
-    except subprocess.TimeoutExpired:
-        return False, "scan timed out"
-    except Exception as e:
-        return False, str(e)
+    return _run_scanner("cleanup", "/app/cleanup-scan.py", 300)
 
 
 # === Explorer + AI ===
@@ -2317,16 +2423,7 @@ def build_explorer_html():
 
 
 def run_tree_scan():
-    try:
-        result = subprocess.run(
-            ["python3", str(APP_DIR / "tree-scan.py")],
-            capture_output=True, text=True, timeout=600,
-        )
-        return result.returncode == 0, result.stderr[-500:] if result.returncode != 0 else "ok"
-    except subprocess.TimeoutExpired:
-        return False, "tree scan timed out"
-    except Exception as e:
-        return False, str(e)
+    return _run_scanner("tree", str(APP_DIR / "tree-scan.py"), 600)
 
 
 def ollama_call(messages, schema=None):
@@ -2577,6 +2674,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json_response(get_quality_profiles())
         elif self.path == "/api/storage-health":
             self._json_response(storage_health())
+        elif self.path == "/api/scan-progress":
+            self._json_response(load_json(PROGRESS_FILE, {"active": False}))
         elif self.path == "/api/tdarr/stats":
             self._json_response(tdarr_stats())
         elif self.path.startswith("/api/version"):
@@ -2816,8 +2915,8 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 def serve():
-    t = threading.Thread(target=digest_scheduler, daemon=True)
-    t.start()
+    threading.Thread(target=digest_scheduler, daemon=True).start()
+    threading.Thread(target=auto_scan_scheduler, daemon=True).start()
     ThreadedHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

@@ -2,6 +2,13 @@
 
 All notable changes to Trimbin are documented here. Newest entries on top.
 
+## 2026-06-01 — v2.7
+
+- **Live scan progress** — Long scans (especially the Storage Explorer tree scan) now show a live progress panel — a bar, a running count, and the directory currently being scanned — instead of a dead spinner. The scanners write a throttled `scan_progress.json`; the UI polls `GET /api/scan-progress`. The tree scan estimates a percentage from the previous scan's directory count; the others show an indeterminate bar with a live counter.
+- **Optional nightly auto-scan** — Set `AUTO_SCAN_TIME` (HH:MM) to run the watch-list scan automatically each day; enable `AUTO_SCAN_STORAGE` to also run the dedup/trickplay/cleanup/tree scans. Off by default (the storage scans are I/O-heavy).
+- **Context-aware Explorer action menu** — The treemap action menu now looks an item up in Radarr/Sonarr first and offers only what fits: a managed movie/show gets **Change quality** + **Trim** (which removes it from *arr so it won't re-download); unmanaged media gets **Delete from disk**. This removes the footgun of disk-deleting a managed item (which would just re-download).
+- **Honest Tdarr tab** — Replaced the per-event "recent transcodes" list (which had no filenames and was dominated by setup/test runs) with a per-library savings breakdown and a clear note: Tdarr's savings log records space saved per transcode but **not** the filename, and its per-file database is empty until Tdarr transcodes in production. The aggregate cards now read "Transcode events" rather than "Transcodes."
+
 ## 2026-06-01 — v2.6
 
 - **Tdarr tab** — New tab surfacing your Tdarr transcode activity: total space saved, transcode count, files tracked, health-check count, and a recent-transcodes list (per-event savings + library). Pulls live from Tdarr's HTTP API (`/api/v2/cruddb`) and caches the last sync, so it keeps showing numbers even when Tdarr is offline (it degrades to a clear "offline — last sync" badge). Configure with `TDARR_URL` (+ optional `TDARR_BROWSER_URL` for the "Open Tdarr" link).

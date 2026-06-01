@@ -18,9 +18,10 @@ Media cleanup tool for the *arr ecosystem. Monitors your watched lists across mu
 - **Duplicate finder** — flags the same movie or series stored more than once (including the same show across `/tv` and `/anime`), with quality / codec / audio / size shown per copy
 - **Orphan & junk cleanup** — finds OS junk, empty dirs, scene/release leftovers, samples, and orphan sidecar files with a 3-tier safety model
 - **Trickplay scan** — flags oversized or video-containing `.trickplay` directories
-- **Tdarr stats** — a Tdarr tab with cumulative transcode savings, counts, and a recent-transcodes list (cached, so it still shows numbers when Tdarr is offline)
+- **Tdarr stats** — a Tdarr tab with cumulative transcode savings and a per-library breakdown (cached, so it still shows numbers when Tdarr is offline)
 - **Storage pool health** — an always-visible header gauge showing how full the media pool is (used / free / %, color-coded by safety level)
 - **Update checker** — a header badge that flags when a newer version is published on the GitHub project
+- **Live scan progress** — long scans show a progress bar + the current directory instead of a dead spinner, with an optional nightly auto-scan (`AUTO_SCAN_TIME`)
 - **Discord digest** — weekly notification of newly watched media still on disk
 - **Status API** — JSON endpoint for dashboard widgets (Homepage, etc.)
 - **Trimmed counter** — tracks cumulative disk space reclaimed
@@ -76,6 +77,7 @@ The status server provides a dark-themed dashboard at port 5380:
 | GET | `/api/storage-health` | Media-pool capacity via `statvfs` (+ optional Netdata enrichment) |
 | GET | `/api/tdarr/stats` | Tdarr transcode stats (cached; live via Tdarr's cruddb API) |
 | GET | `/api/version` | Running version + latest on GitHub (update check) |
+| GET | `/api/scan-progress` | Live progress of the running scan (for the progress panel) |
 | POST | `/api/ai/analyze` | Ollama keep/delete recommendations for the current view |
 
 ## Security

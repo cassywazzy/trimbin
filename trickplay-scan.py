@@ -30,6 +30,7 @@ def scan_trickplay():
     results = []
     total_size = 0
     total_dirs = 0
+    dirs_seen = 0
 
     for root_dir in media_roots:
         if not os.path.isdir(root_dir):
@@ -37,6 +38,8 @@ def scan_trickplay():
         library = os.path.basename(root_dir)
 
         for dirpath, dirnames, filenames in os.walk(root_dir):
+            dirs_seen += 1
+            tc.progress("trickplay", done=dirs_seen, current=dirpath)
             basename = os.path.basename(dirpath)
             if not basename.endswith(".trickplay") and basename != "trickplay":
                 continue
@@ -98,6 +101,7 @@ def scan_trickplay():
     }
 
     tc.write_json_atomic(OUTPUT_FILE, output)
+    tc.progress_done("trickplay")
 
     return output
 

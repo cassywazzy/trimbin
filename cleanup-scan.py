@@ -123,6 +123,7 @@ def scan():
     items = []
     category_counts = {}
     category_bytes = {}
+    dirs_seen = 0
 
     def add_item(category, path, size_bytes, label, library):
         items.append({
@@ -143,6 +144,8 @@ def scan():
         library = os.path.basename(root)
 
         for dirpath, dirnames, filenames in os.walk(root):
+            dirs_seen += 1
+            tc.progress("cleanup", done=dirs_seen, current=dirpath)
             basename = os.path.basename(dirpath).lower()
 
             if basename in JUNK_DIRS:
@@ -255,6 +258,7 @@ def scan():
     }
 
     tc.write_json_atomic(OUTPUT_FILE, result)
+    tc.progress_done("cleanup")
     print(f"Found {len(items)} cleanup items, {result['total_gb']} GB reclaimable")
     for cat, info in by_category.items():
         print(f"  {cat}: {info['count']} items, {info['size_gb']} GB")

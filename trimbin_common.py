@@ -58,3 +58,34 @@ def write_json_atomic(path, data, indent=2):
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=indent))
     os.replace(tmp, path)
+
+
+# --- Live scan progress (polled by the web UI so long scans aren't a dead spinner) ---
+import time as _time
+
+PROGRESS_FILE = DATA_DIR / "scan_progress.json"
+_last_progress_write = [0.0]
+
+
+def progress(scan_type, done=0, total=0, current="", phase="scanning", force=False):
+    """Write a throttled progress record. Best-effort and never raises — a
+    progress write must never break a scan. Throttled to ~2.5 writes/sec."""
+    now = _time.time()
+    if not force and now - _last_progress_write[0] < 0.4:
+        return
+    _last_progress_write[0] = now
+    try:
+        write_json_atomic(PROGRESS_FILE, {
+            "active": True, "type": scan_type, "phase": phase,
+            "done": done, "total": total, "current": current, "updated": now,
+        })
+    except Exception:
+        pass
+
+
+def progress_done(scan_type):
+    """Mark the scan finished so the UI stops polling."""
+    try:
+        write_json_atomic(PROGRESS_FILE, {"active": False, "type": scan_type, "updated": _time.time()})
+    except Exception:
+        pass
