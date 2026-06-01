@@ -53,6 +53,10 @@ CONFIG_KEYS = [
     ("OLLAMA_MODEL", "Ollama model name (e.g. llama3.1:8b)", "ai"),
     ("OLLAMA_TEMPERATURE", "AI temperature (0.0-1.0, lower=more focused)", "ai"),
     ("OLLAMA_TIMEOUT", "AI request timeout in seconds", "ai"),
+    ("TDARR_URL", "Tdarr API URL (container-reachable, e.g. http://tdarr-host:8265)", "tdarr"),
+    ("TDARR_BROWSER_URL", "Tdarr browser URL (for the UI link, e.g. https://tdarr.example.com)", "tdarr"),
+    ("NETDATA_URL", "Netdata URL (optional — raw pool stats enrichment)", "scans"),
+    ("GITHUB_REPO", "GitHub repo for update checks (owner/name)", "about"),
 ]
 
 SELECT_KEYS = {"LB_AUTO_IGNORE_LIKED", "LB_MIN_RATING_IGNORE"}
@@ -288,6 +292,26 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 .ai-rec .conf{float:right;font-size:.8em;color:#666}
 .explorer-empty{text-align:center;padding:60px 20px;color:#666}
 .explorer-empty button{margin-top:12px}
+.version-badge{font-size:.7em;padding:3px 10px;border-radius:10px;text-decoration:none;border:1px solid #0f3460;color:#888;margin-left:auto;white-space:nowrap}
+.version-badge.update{border-color:#f39c12;color:#f39c12;background:#f39c1211}
+.version-badge.current{border-color:#0f3460;color:#666}
+.pool-health-wrap{background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:12px 16px;margin-bottom:20px}
+.pool-health-head{display:flex;align-items:center;justify-content:space-between;font-size:.8em;color:#888;margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px}
+.pool-refresh{cursor:pointer;color:#00d474;font-size:1.2em;line-height:1}
+.pool-bar{margin-bottom:10px}
+.pool-bar:last-child{margin-bottom:0}
+.pool-bar-head{display:flex;justify-content:space-between;gap:8px;font-size:.82em;margin-bottom:4px}
+.pool-bar-head .ppath{color:#ccc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pool-track{height:14px;background:#0d1b2a;border-radius:7px;overflow:hidden;border:1px solid #0f3460}
+.pool-fill{height:100%;border-radius:7px;transition:width .4s}
+.pool-sub{font-size:.72em;color:#666;margin-top:3px}
+.pool-loading{color:#666;font-size:.85em}
+.tdarr-cards{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px}
+.tdarr-card{background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:16px 20px;flex:1;min-width:120px;text-align:center}
+.tdarr-card .value{font-size:1.8em;font-weight:700;color:#00d474}
+.tdarr-card .label{font-size:.75em;color:#888;margin-top:4px}
+.tdarr-offline{background:#e9456022;border:1px solid #e9456044;color:#e94560;padding:8px 14px;border-radius:6px;font-size:.82em;margin-bottom:12px}
+.tdarr-warn{background:#f39c1211;border:1px solid #f39c1233;color:#f39c12;padding:8px 14px;border-radius:6px;font-size:.78em;margin-bottom:12px;white-space:pre-line}
 @media(max-width:600px){
   .summary{gap:8px}
   .stat{padding:10px 6px;min-width:70px}
@@ -318,6 +342,7 @@ function switchTab(name) {
 <img src="/logo.png" alt="Trimbin" style="height:40px;border-radius:6px">
 <h1>Trimbin</h1>
 <button class="refresh-btn" onclick="runScan(this)" title="Run scanner now">Scan</button>
+<a id="version-badge" class="version-badge" href="#" target="_blank" rel="noopener"></a>
 </div>
 <p class="subtitle">Watched media still on disk &mdash; last scan: $last_run</p>
 <div class="summary">
@@ -329,6 +354,11 @@ function switchTab(name) {
 <div class="stat danger"><div class="value">$trimmed_gb GB</div><div class="label">Trimmed</div></div>
 </div>
 
+<div class="pool-health-wrap">
+<div class="pool-health-head"><span>Storage pool</span><span class="pool-refresh" onclick="loadPoolHealth()" title="Refresh">&#x21bb;</span></div>
+<div id="pool-health" class="pool-health"><div class="pool-loading">checking&hellip;</div></div>
+</div>
+
 <div class="tabs">
 <div class="tab active" data-tab="movies" onclick="switchTab('movies')">Movies</div>
 <div class="tab" data-tab="shows" onclick="switchTab('shows')">Shows</div>
@@ -336,6 +366,7 @@ function switchTab(name) {
 <div class="tab" data-tab="trickplay" onclick="switchTab('trickplay')">Trickplay</div>
 <div class="tab" data-tab="cleanup" onclick="switchTab('cleanup')">Cleanup</div>
 <div class="tab" data-tab="explorer" onclick="switchTab('explorer')">Explorer</div>
+<div class="tab" data-tab="tdarr" onclick="switchTab('tdarr')">Tdarr</div>
 <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -363,6 +394,15 @@ $cleanup_html
 
 <div id="tab-explorer" class="tab-content">
 $explorer_html
+</div>
+
+<div id="tab-tdarr" class="tab-content">
+<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;margin-top:12px">
+<h2 style="margin:0;border:none;padding:0">Tdarr Transcodes</h2>
+<button class="refresh-btn" onclick="loadTdarr(this)">Refresh</button>
+<span id="tdarr-status" style="color:#666;font-size:.8em"></span>
+</div>
+<div id="tdarr-body"><div class="empty">Loading&hellip;</div></div>
 </div>
 
 <div id="tab-settings" class="tab-content">
@@ -620,6 +660,23 @@ function isMediaPath(p) {
   return false;
 }
 
+// A media *entry* is exactly one level below a library root: the movie folder
+// or show folder Radarr/Sonarr actually manages. Season folders, disc folders,
+// .trickplay dirs and other sub-paths are NOT entries, so they don't get
+// Trim/Quality actions (which would just fail the *arr lookup).
+function isMediaEntry(p) {
+  if (!p) return false;
+  var roots = window.TRIMBIN_MEDIA_ROOTS || [];
+  for (var i = 0; i < roots.length; i++) {
+    var r = roots[i];
+    if (r && p.indexOf(r + '/') === 0) {
+      var rest = p.slice(r.length + 1);
+      return rest.length > 0 && rest.indexOf('/') === -1;
+    }
+  }
+  return false;
+}
+
 // Sort a level's children by the active mode (so "By Age"/"By Type" actually re-order the list, not just recolor)
 function sortChildren(children, mode) {
   var arr = children.slice();
@@ -685,15 +742,15 @@ function renderTreemap() {
     .attr('stroke', '#1a1a2e')
     .attr('stroke-width', 1.5)
     .attr('rx', 3)
-    .style('cursor', function(d) { return ((d.data.children && d.data.children.length > 0) || isMediaPath(d.data.path)) ? 'pointer' : 'default'; })
+    .style('cursor', function(d) { return ((d.data.children && d.data.children.length > 0) || isMediaEntry(d.data.path)) ? 'pointer' : 'default'; })
     .on('click', function(ev, d) {
       if (d.data.children && d.data.children.length > 0) {
         explorerCurrent = d.data;
         renderTreemap();
         renderTreeList();
         updateBreadcrumbs();
-      } else if (isMediaPath(d.data.path)) {
-        explorerQualityByPath(d.data.path, {top: ev.clientY, bottom: ev.clientY, right: ev.clientX + 100});
+      } else if (isMediaEntry(d.data.path)) {
+        openActionMenu(d.data.path, d.data.name, d.data, ev.clientX, ev.clientY);
       }
     })
     .append('title')
@@ -776,7 +833,7 @@ function renderTreeList() {
     html += '<span class="age" style="color:' + ageColor + '">' + fmtAge(c.mtime) + '</span>';
     var p = c.path || '';
     html += '<span class="actions">';
-    if (isMediaPath(p)) {
+    if (isMediaEntry(p)) {
       html += '<button class="trim-btn" onclick="event.stopPropagation();explorerTrim(' + origIdx + ')">Trim</button>';
       html += '<button onclick="event.stopPropagation();explorerQuality(this,' + origIdx + ')">Quality &#9662;</button>';
     }
@@ -903,33 +960,104 @@ function explorerAiAnalyze() {
     .finally(function() { clearTimeout(timer); });
 }
 
-function explorerTrim(idx) {
-  var parent = explorerCurrent;
-  var c = (parent.children || [])[idx];
-  if (!c) return;
-  var path = c.path || '';
-  if (!confirm('Trim "' + c.name + '" (' + fmtSize(c.size) + ')?\\nThis will delete files and remove from Radarr/Sonarr.')) return;
+function findParent(root, node) {
+  if (!root || !root.children) return null;
+  for (var i = 0; i < root.children.length; i++) {
+    if (root.children[i] === node) return root;
+    var p = findParent(root.children[i], node);
+    if (p) return p;
+  }
+  return null;
+}
+
+function removeNodeFromTree(node) {
+  // Drop a node from the live tree + decrement ancestor sizes so the view
+  // refreshes immediately (the cached /api/tree still has it until next Scan).
+  if (!node) return;
+  var parent = findParent(explorerData, node);
+  if (!parent) return;
+  var ki = (parent.children || []).indexOf(node);
+  if (ki >= 0) {
+    parent.children.splice(ki, 1);
+    var pth = buildPath(explorerData, parent);
+    for (var j = 0; j < pth.length; j++) { pth[j].size = Math.max(0, (pth[j].size || 0) - (node.size || 0)); }
+  }
+  renderTreemap(); renderTreeList(); updateBreadcrumbs();
+}
+
+function explorerDeleteFromDisk(path, name, node) {
+  fetch('/api/explorer/delete', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path: path})})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) { showToast('Deleted from disk: ' + name); removeNodeFromTree(node); }
+      else { showToast('Delete error: ' + (d.error || 'unknown')); }
+    })
+    .catch(function(e) { showToast('Error: ' + e); });
+}
+
+// Trim a media path: look it up in Radarr/Sonarr and remove it there. If it
+// isn't managed by *arr (e.g. a manually-added remux), offer a direct disk delete.
+function explorerTrimByPath(path, name, node) {
   fetch('/api/explorer/lookup?path=' + encodeURIComponent(path))
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (d.error) { showToast('Not found in Radarr/Sonarr: ' + d.error); return; }
+      if (d.error) {
+        if (confirm('"' + name + '" isn\\'t managed by Radarr/Sonarr.\\nDelete it directly from disk? This cannot be undone.')) {
+          explorerDeleteFromDisk(path, name, node);
+        }
+        return;
+      }
       var trimUrl = d.type === 'movie' ? '/api/trim/' + d.tmdbId : '/api/trim-show/' + d.id;
       fetch(trimUrl, {method: 'POST'}).then(function(r) { return r.json(); }).then(function(r) {
-        if (r.ok) {
-          showToast('Trimmed: ' + d.title);
-          // Drop the node from the live tree + decrement ancestor sizes so the view refreshes
-          // immediately (the cached /api/tree still has it until the next Scan).
-          var ki = (parent.children || []).indexOf(c);
-          if (ki >= 0) {
-            parent.children.splice(ki, 1);
-            var pth = buildPath(explorerData, parent);
-            for (var j = 0; j < pth.length; j++) { pth[j].size = Math.max(0, (pth[j].size || 0) - (c.size || 0)); }
-          }
-          if (explorerCurrent === parent) { renderTreemap(); renderTreeList(); updateBreadcrumbs(); }
-        } else { showToast('Trim error: ' + (r.error || 'unknown')); }
+        if (r.ok) { showToast('Trimmed: ' + d.title); removeNodeFromTree(node); }
+        else { showToast('Trim error: ' + (r.error || 'unknown')); }
       });
     })
     .catch(function(e) { showToast('Error: ' + e); });
+}
+
+function explorerTrim(idx) {
+  var c = (explorerCurrent.children || [])[idx];
+  if (!c) return;
+  if (!confirm('Trim "' + c.name + '" (' + fmtSize(c.size) + ')?\\nThis will delete files and remove it from Radarr/Sonarr.')) return;
+  explorerTrimByPath(c.path || '', c.name, c);
+}
+
+// Action menu for a media entry (opened from a treemap cell): Quality / Trim / Delete.
+function openActionMenu(path, name, node, x, y) {
+  var old = document.getElementById('action-menu');
+  if (old) old.remove();
+  var m = document.createElement('div');
+  m.id = 'action-menu';
+  m.style.cssText = 'position:fixed;background:#16213e;border:1px solid #0f3460;border-radius:6px;padding:4px 0;z-index:999;min-width:200px;box-shadow:0 4px 16px rgba(0,0,0,.6)';
+  m.style.left = Math.max(4, Math.min(x, window.innerWidth - 210)) + 'px';
+  m.style.top = Math.max(4, Math.min(y, window.innerHeight - 170)) + 'px';
+  var hdr = document.createElement('div');
+  hdr.style.cssText = 'padding:6px 12px;font-size:.75em;color:#888;border-bottom:1px solid #0f3460;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:260px';
+  hdr.textContent = name;
+  m.appendChild(hdr);
+  function close() { m.remove(); document.removeEventListener('click', onOut); }
+  function onOut(ev) { if (!m.contains(ev.target)) close(); }
+  function addItem(label, color, fn) {
+    var it = document.createElement('div');
+    it.style.cssText = 'padding:8px 12px;cursor:pointer;font-size:.82em;color:' + color;
+    it.textContent = label;
+    it.onmouseover = function() { this.style.background = '#1e2d4a'; };
+    it.onmouseout = function() { this.style.background = 'transparent'; };
+    it.onclick = function() { close(); fn(); };
+    m.appendChild(it);
+  }
+  addItem('Change quality profile', '#ccc', function() {
+    openQualityDropdown(path, {top: y, bottom: y, right: x + 200}, null);
+  });
+  addItem('Trim (delete + remove from *arr)', '#e94560', function() {
+    if (confirm('Trim "' + name + '"?\\nThis deletes files and removes it from Radarr/Sonarr.')) explorerTrimByPath(path, name, node);
+  });
+  addItem('Delete from disk', '#e94560', function() {
+    if (confirm('Permanently delete "' + name + '" from disk? This cannot be undone.')) explorerDeleteFromDisk(path, name, node);
+  });
+  document.body.appendChild(m);
+  setTimeout(function() { document.addEventListener('click', onOut); }, 0);
 }
 
 function explorerQuality(btn, idx) {
@@ -1022,16 +1150,111 @@ function checkAiStatus() {
   }).catch(function(){});
 }
 
-// Init explorer when tab is shown
+/* === Storage pool health (header widget) === */
+function poolColor(pct) { return pct >= 90 ? '#e94560' : (pct >= 80 ? '#f39c12' : '#00d474'); }
+function renderPoolHealth(d) {
+  var el = document.getElementById('pool-health');
+  if (!el) return;
+  var rows = (d && d.media) || [];
+  if (!rows.length) { el.innerHTML = '<div class="pool-loading">No media libraries configured.</div>'; return; }
+  var html = '';
+  rows.forEach(function(m) {
+    var c = poolColor(m.pct);
+    html += '<div class="pool-bar">'
+      + '<div class="pool-bar-head"><span class="ppath">' + escHtml(m.path) + '</span>'
+      + '<span style="color:' + c + '">' + m.pct + '% full &middot; ' + fmtSize(m.avail) + ' free</span></div>'
+      + '<div class="pool-track"><div class="pool-fill" style="width:' + Math.min(100, m.pct) + '%;background:' + c + '"></div></div>'
+      + '<div class="pool-sub">' + fmtSize(m.used) + ' used of ' + fmtSize(m.total) + '</div>'
+      + '</div>';
+  });
+  (d.pools || []).forEach(function(p) {
+    var c = poolColor(p.pct);
+    html += '<div class="pool-bar"><div class="pool-bar-head"><span class="ppath">' + escHtml(p.name) + ' (pool)</span>'
+      + '<span style="color:' + c + '">' + p.pct + '% full</span></div>'
+      + '<div class="pool-track"><div class="pool-fill" style="width:' + Math.min(100, p.pct) + '%;background:' + c + '"></div></div></div>';
+  });
+  el.innerHTML = html;
+}
+function loadPoolHealth() {
+  var el = document.getElementById('pool-health');
+  if (el) el.innerHTML = '<div class="pool-loading">checking&hellip;</div>';
+  fetch('/api/storage-health').then(function(r) { return r.json(); }).then(renderPoolHealth)
+    .catch(function() { if (el) el.innerHTML = '<div class="pool-loading">unavailable</div>'; });
+}
+
+/* === Update-available badge === */
+function loadVersion() {
+  fetch('/api/version').then(function(r) { return r.json(); }).then(function(d) {
+    var el = document.getElementById('version-badge');
+    if (!el) return;
+    el.href = d.html_url || '#';
+    if (d.update_available) { el.className = 'version-badge update'; el.textContent = 'v' + d.version + ' → ' + d.latest + ' available'; }
+    else { el.className = 'version-badge current'; el.textContent = 'v' + d.version + (d.latest ? ' · up to date' : ''); }
+  }).catch(function() {});
+}
+
+/* === Tdarr tab === */
+var tdarrLoaded = false;
+function fmtTs(ms) { if (!ms) return ''; try { return new Date(ms).toISOString().slice(0, 10); } catch (e) { return ''; } }
+function renderTdarr(d) {
+  var body = document.getElementById('tdarr-body');
+  var status = document.getElementById('tdarr-status');
+  if (!body) return;
+  if (!d || d.configured === false) {
+    body.innerHTML = '<div class="empty">Tdarr isn\\'t configured. Add <b>Tdarr API URL</b> in Settings (e.g. http://tdarr-host:8265).</div>';
+    if (status) status.textContent = '';
+    return;
+  }
+  var html = '';
+  if (d.online === false) {
+    html += '<div class="tdarr-offline">Tdarr is offline' + (d.synced_at ? ' &mdash; showing last sync (' + escHtml(d.synced_at) + ')' : '') + '. Numbers refresh when Tdarr is running.</div>';
+    if (status) status.textContent = 'offline';
+  } else if (status) { status.textContent = 'synced ' + (d.synced_at || ''); }
+  html += '<div class="tdarr-cards">'
+    + '<div class="tdarr-card"><div class="value">' + (d.gb_saved != null ? d.gb_saved + ' GB' : '—') + '</div><div class="label">Space saved</div></div>'
+    + '<div class="tdarr-card"><div class="value">' + (d.transcodes != null ? d.transcodes : '—') + '</div><div class="label">Transcodes</div></div>'
+    + '<div class="tdarr-card"><div class="value">' + (d.files != null ? Number(d.files).toLocaleString() : '—') + '</div><div class="label">Files tracked</div></div>'
+    + '<div class="tdarr-card"><div class="value">' + (d.health_checks != null ? Number(d.health_checks).toLocaleString() : '—') + '</div><div class="label">Health checks</div></div>'
+    + '</div>';
+  if (d.warning) { html += '<div class="tdarr-warn">' + escHtml(d.warning) + '</div>'; }
+  var recent = d.recent || [];
+  if (recent.length) {
+    html += '<h2 style="font-size:1em;color:#ccc;border:none;margin:18px 0 8px">Recent transcodes</h2>';
+    html += '<table><thead><tr><th>When</th><th>Library</th><th>Saved</th></tr></thead><tbody>';
+    recent.slice(0, 30).forEach(function(e) {
+      html += '<tr><td>' + escHtml(fmtTs(e.ts)) + '</td><td>' + escHtml(e.library || '?') + '</td>'
+        + '<td class="size">' + (e.saved_gb != null ? Number(e.saved_gb).toFixed(2) + ' GB' : '') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  }
+  html += '<p style="font-size:.75em;color:#666;margin-top:12px">';
+  if (d.browser_url) { html += '<a class="arr-link" href="' + (d.browser_url || '').replace(/"/g, '%22') + '" target="_blank" rel="noopener">Open Tdarr</a> '; }
+  html += 'Recent-transcode events are from Tdarr\\'s last full sync.</p>';
+  body.innerHTML = html;
+}
+function loadTdarr(btn) {
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin">&#x21bb;</span> Loading...'; }
+  fetch('/api/tdarr/stats').then(function(r) { return r.json(); }).then(function(d) {
+    renderTdarr(d); tdarrLoaded = true;
+  }).catch(function(e) {
+    var body = document.getElementById('tdarr-body'); if (body) body.innerHTML = '<div class="empty">Error: ' + escHtml(String(e)) + '</div>';
+  }).finally(function() { if (btn) { btn.disabled = false; btn.textContent = 'Refresh'; } });
+}
+
+// Init explorer/tdarr when their tab is shown; load header widgets on page load
 (function() {
   var origSwitch = switchTab;
   switchTab = function(name) {
     origSwitch(name);
     if (name === 'explorer' && !explorerData) { initExplorer(); checkAiStatus(); }
+    if (name === 'tdarr' && !tdarrLoaded) { loadTdarr(); }
   };
   // Re-check hash after override is in place
   var h = window.location.hash.replace('#', '');
   if (h === 'explorer') { initExplorer(); checkAiStatus(); }
+  if (h === 'tdarr') { loadTdarr(); }
+  loadPoolHealth();
+  loadVersion();
 })();
 </script>
 </body></html>""")
@@ -1155,10 +1378,13 @@ def build_settings_html():
         "notifications": "Notifications",
         "scans": "Storage Scans",
         "auto_ignore": "Auto-Ignore",
+        "ai": "AI (Ollama)",
+        "tdarr": "Tdarr",
+        "about": "Updates",
     }
 
     parts = ['<form id="settingsForm" class="settings-form" onsubmit="event.preventDefault();saveSettings()">']
-    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications", "scans", "auto_ignore"]:
+    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications", "scans", "auto_ignore", "ai", "tdarr", "about"]:
         if group_key not in groups:
             continue
         parts.append(f'<div class="settings-group"><h3>{group_titles.get(group_key, group_key)}</h3>')
@@ -1677,6 +1903,165 @@ def get_quality_profiles():
     return result
 
 
+TRIMBIN_VERSION = "2.6"  # bump on release; compared against GitHub for the update badge
+VERSION_CACHE_FILE = DATA_DIR / "version_check.json"
+TDARR_CACHE_FILE = DATA_DIR / "tdarr_stats.json"
+
+
+def _netdata_pools():
+    """Best-effort raw zpool capacity from Netdata. Returns [] on any failure —
+    Netdata may be auth-walled or absent, and the statvfs gauge is the source of
+    truth. This hook lets a future clean Netdata endpoint enrich the gauge
+    without changing the UI."""
+    url = get_config("NETDATA_URL").rstrip("/")
+    if not url:
+        return []
+    try:
+        req = urllib.request.Request(f"{url}/api/v1/info",
+                                     headers={"User-Agent": "trimbin"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            json.loads(resp.read())
+    except Exception:
+        return []
+    # No stable cross-version Netdata chart exposes zpool CAP%, so nothing to add
+    # yet. statvfs remains authoritative; revisit if a collector is wired up.
+    return []
+
+
+def storage_health():
+    """Capacity of the media libraries via statvfs (portable + exact), deduped
+    by filesystem. Netdata raw-pool data is best-effort enrichment."""
+    out = {"media": [], "pools": [], "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    libs = [p.strip() for p in get_config("MEDIA_LIBRARIES").split(",") if p.strip()]
+    seen = set()
+    for lib in libs:
+        try:
+            st = os.statvfs(lib)
+        except Exception:
+            continue
+        fsid = (st.f_blocks, st.f_bavail, st.f_frsize)
+        if fsid in seen:
+            continue
+        seen.add(fsid)
+        total = st.f_blocks * st.f_frsize
+        avail = st.f_bavail * st.f_frsize
+        free = st.f_bfree * st.f_frsize
+        used = total - free
+        pct = round(used / total * 100, 1) if total else 0
+        out["media"].append({"path": lib, "total": total, "used": used,
+                             "avail": avail, "pct": pct})
+    try:
+        out["pools"] = _netdata_pools()
+    except Exception:
+        out["pools"] = []
+    return out
+
+
+def _parse_ver(v):
+    parts = []
+    for part in str(v).lstrip("vV").split("."):
+        num = "".join(ch for ch in part if ch.isdigit())
+        parts.append(int(num) if num else 0)
+    return tuple(parts) or (0,)
+
+
+def version_info(force=False):
+    """Compare the running version against the latest GitHub release/tag, cached
+    ~6h so we never hammer the API. Points only at the public repo, never the
+    user's server — so it works the same for anyone self-hosting a fork."""
+    cached = load_json(VERSION_CACHE_FILE, {})
+    now = time.time()
+    if not force and cached.get("checked_ts", 0) > now - 21600:
+        return {k: v for k, v in cached.items() if k != "checked_ts"}
+    repo = get_config("GITHUB_REPO") or "cassywazzy/trimbin"
+    info = {"version": TRIMBIN_VERSION, "latest": None, "update_available": False,
+            "html_url": f"https://github.com/{repo}",
+            "checked_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    latest = None
+
+    def _gh(path):
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}{path}",
+            headers={"Accept": "application/vnd.github+json", "User-Agent": "trimbin"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read())
+
+    try:
+        rel = _gh("/releases/latest")
+        latest = rel.get("tag_name")
+        info["html_url"] = rel.get("html_url") or info["html_url"]
+    except urllib.error.HTTPError as e:
+        if e.code == 404:  # no releases published yet -> newest tag
+            try:
+                tags = _gh("/tags")
+                if tags:
+                    latest = tags[0].get("name")
+                    info["html_url"] = f"https://github.com/{repo}/releases"
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    if latest:
+        info["latest"] = latest
+        info["update_available"] = _parse_ver(latest) > _parse_ver(TRIMBIN_VERSION)
+    cached_out = dict(info)
+    cached_out["checked_ts"] = now
+    save_json(VERSION_CACHE_FILE, cached_out)
+    return info
+
+
+def tdarr_stats():
+    """Tdarr global stats via its HTTP API (cruddb StatisticsJSONDB), cached to
+    disk and served from cache when Tdarr is down (it's frequently paused for
+    stability). `recent` transcode events are seeded from Tdarr's storage_saved
+    table — not exposed via cruddb — so they reflect the last full sync."""
+    url = get_config("TDARR_URL").rstrip("/")
+    cached = load_json(TDARR_CACHE_FILE, {})
+    browser = get_config("TDARR_BROWSER_URL") or url
+    if not url:
+        if cached:
+            cached["online"] = False
+            return cached
+        return {"configured": False, "online": False}
+    try:
+        body = json.dumps({"data": {"collection": "StatisticsJSONDB",
+                                    "mode": "getById", "docID": "statistics"}}).encode()
+        req = urllib.request.Request(f"{url}/api/v2/cruddb", data=body,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            doc = json.loads(resp.read())
+        if isinstance(doc, dict) and "totalTranscodeCount" not in doc:
+            for key in ("data", "doc", "result"):
+                if isinstance(doc.get(key), dict):
+                    doc = doc[key]
+                    break
+        # Guard: don't overwrite a good cache with an unexpected response shape.
+        if not isinstance(doc, dict) or "totalTranscodeCount" not in doc:
+            raise ValueError("unexpected cruddb response shape")
+        out = {
+            "configured": True, "online": True,
+            "synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "gb_saved": round(float(doc.get("sizeDiff", 0) or 0), 1),
+            "transcodes": doc.get("totalTranscodeCount", 0),
+            "health_checks": doc.get("totalHealthCheckCount", 0),
+            "files": doc.get("totalFileCount", 0),
+            "score": doc.get("tdarrScore", 0),
+            "warning": (doc.get("processWarning") or "").strip(),
+            "recent": cached.get("recent", []),
+            "browser_url": browser,
+        }
+        save_json(TDARR_CACHE_FILE, out)
+        return out
+    except Exception as e:
+        if cached:
+            cached["online"] = False
+            cached["error"] = str(e)
+            cached["browser_url"] = browser
+            return cached
+        return {"configured": True, "online": False, "error": str(e), "browser_url": browser}
+
+
 def set_quality_profile(media_type, media_id, quality_profile_id, search=False):
     """Update quality profile for a movie or series, optionally trigger search."""
     if media_type == "movie":
@@ -1796,6 +2181,35 @@ def _remove_deleted_from_scans(deleted_path):
             trick["flagged"] = new_flagged
             trick["flagged_count"] = len(new_flagged)
             save_json(TRICKPLAY_FILE, trick)
+
+
+def delete_explorer_path(target_path):
+    """Filesystem-delete an arbitrary explorer path (e.g. media not managed by
+    Radarr/Sonarr). Same realpath-containment guard as delete_path(), plus a
+    refusal to ever delete a configured library root itself."""
+    if not target_path:
+        return False, "No path provided"
+    if not os.path.exists(target_path):
+        return False, "Path no longer exists on disk"
+    real = os.path.realpath(target_path)
+    roots = [os.path.realpath(p.strip()) for p in get_config("MEDIA_LIBRARIES").split(",") if p.strip()]
+    if not roots:
+        return False, "No media libraries configured"
+    if any(real == r for r in roots):
+        return False, "Refusing to delete a library root"
+    if not any(real.startswith(r + os.sep) for r in roots):
+        return False, "Path is not under a configured media library"
+    try:
+        if os.path.islink(target_path):
+            os.remove(target_path)
+        elif os.path.isdir(target_path):
+            shutil.rmtree(target_path)
+        else:
+            os.remove(target_path)
+    except Exception as e:
+        return False, str(e)
+    _remove_deleted_from_scans(target_path)
+    return True, "ok"
 
 
 def run_scan():
@@ -2161,6 +2575,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json_response(explorer_lookup(path))
         elif self.path == "/api/explorer/quality-profiles":
             self._json_response(get_quality_profiles())
+        elif self.path == "/api/storage-health":
+            self._json_response(storage_health())
+        elif self.path == "/api/tdarr/stats":
+            self._json_response(tdarr_stats())
+        elif self.path.startswith("/api/version"):
+            force = "force" in urllib.parse.urlparse(self.path).query
+            self._json_response(version_info(force=force))
         elif self.path == "/ping":
             self.send_response(200)
             self.end_headers()
@@ -2288,6 +2709,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 ok, msg = set_quality_profile(media_type, media_id, qp_id, search=do_search)
                 self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path == "/api/explorer/delete":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length)) if length else {}
+            ok, msg = delete_explorer_path(body.get("path", ""))
+            self._json_response({"ok": ok, "error": msg if not ok else None})
         else:
             self.send_response(404)
             self.end_headers()

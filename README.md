@@ -18,6 +18,9 @@ Media cleanup tool for the *arr ecosystem. Monitors your watched lists across mu
 - **Duplicate finder** — flags the same movie or series stored more than once (including the same show across `/tv` and `/anime`), with quality / codec / audio / size shown per copy
 - **Orphan & junk cleanup** — finds OS junk, empty dirs, scene/release leftovers, samples, and orphan sidecar files with a 3-tier safety model
 - **Trickplay scan** — flags oversized or video-containing `.trickplay` directories
+- **Tdarr stats** — a Tdarr tab with cumulative transcode savings, counts, and a recent-transcodes list (cached, so it still shows numbers when Tdarr is offline)
+- **Storage pool health** — an always-visible header gauge showing how full the media pool is (used / free / %, color-coded by safety level)
+- **Update checker** — a header badge that flags when a newer version is published on the GitHub project
 - **Discord digest** — weekly notification of newly watched media still on disk
 - **Status API** — JSON endpoint for dashboard widgets (Homepage, etc.)
 - **Trimmed counter** — tracks cumulative disk space reclaimed
@@ -69,6 +72,10 @@ The status server provides a dark-themed dashboard at port 5380:
 | GET | `/api/explorer/lookup?path=` · `/api/explorer/quality-profiles` | Resolve a path to Radarr/Sonarr · list quality profiles |
 | POST | `/api/explorer/set-quality` | Change a movie/show quality profile (optionally search) |
 | POST | `/api/delete-path/<hash>` | Delete a scanned file/dir (validated against `MEDIA_LIBRARIES`) |
+| POST | `/api/explorer/delete` | Delete an arbitrary media path from disk (same realpath-containment guard) |
+| GET | `/api/storage-health` | Media-pool capacity via `statvfs` (+ optional Netdata enrichment) |
+| GET | `/api/tdarr/stats` | Tdarr transcode stats (cached; live via Tdarr's cruddb API) |
+| GET | `/api/version` | Running version + latest on GitHub (update check) |
 | POST | `/api/ai/analyze` | Ollama keep/delete recommendations for the current view |
 
 ## Security

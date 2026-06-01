@@ -2,6 +2,15 @@
 
 All notable changes to Trimbin are documented here. Newest entries on top.
 
+## 2026-06-01 — v2.6
+
+- **Tdarr tab** — New tab surfacing your Tdarr transcode activity: total space saved, transcode count, files tracked, health-check count, and a recent-transcodes list (per-event savings + library). Pulls live from Tdarr's HTTP API (`/api/v2/cruddb`) and caches the last sync, so it keeps showing numbers even when Tdarr is offline (it degrades to a clear "offline — last sync" badge). Configure with `TDARR_URL` (+ optional `TDARR_BROWSER_URL` for the "Open Tdarr" link).
+- **Storage pool health widget** — An always-visible capacity gauge in the header: how full the media pool is (used / free / %), color-coded green < 80 % / amber 80–90 % / red > 90 %, refreshed on load and on demand. Reads exact figures via `statvfs` on each media library (deduped by filesystem); optional best-effort Netdata enrichment via `NETDATA_URL`.
+- **Explorer action menu** — Clicking a media cell in the treemap now opens an action menu (Change quality profile / Trim / Delete from disk) instead of jumping straight to the quality dropdown.
+- **Entry-level Explorer actions + delete-from-disk** — Trim/Quality actions now appear only on actual movie/show *entries* (one level below a library root), not on season folders, disc folders, or `.trickplay` subdirectories that were never *arr-managed. Media that isn't tracked by Radarr/Sonarr (e.g. a manually-added remux) can now be removed directly from disk via the same realpath-containment guard (`POST /api/explorer/delete`, with a refusal to ever delete a library root).
+- **Update checker** — A version badge in the header checks the GitHub project (`/releases/latest`, falling back to tags) and shows "update available" when a newer version exists. Cached ~6 h; points only at the public repo (configurable via `GITHUB_REPO`), never at any private server — so it works for anyone self-hosting.
+- **Settings: Ollama fields now visible** — The AI (Ollama) settings group was defined but never rendered in the Settings form; it now appears alongside new Tdarr and Updates groups.
+
 ## 2026-05-29
 
 - **Maintenance / robustness pass** — Shared `trimbin_common.py` (single source of truth for the file-type extension sets, config loading, recursive dir sizing, and atomic JSON writes — the scanners' sets had drifted out of sync). Scans are now crash-safe: a failed Radarr/Sonarr/Simkl call fires the Healthchecks alert instead of aborting silently, and `api_json` retries transient 5xx/timeout/connection errors. Simkl show de-dup now keeps the richer record across movie/show/anime categories, skips Sonarr series with no TVDB id, drops a fragile recursive re-sync, and URL-encodes the delta timestamp. Jellyfin lookups send the API key as a header (`X-Emby-Token`) rather than a query param. Trakt wired in as an optional, env-gated watch source. All scanners write their JSON atomically.
