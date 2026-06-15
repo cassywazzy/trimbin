@@ -567,6 +567,33 @@ def fetch_jellystat_total_users():
 
 JELLYFIN_URL = _cfg("JELLYFIN_URL").rstrip("/")
 JELLYFIN_API_KEY = _cfg("JELLYFIN_API_KEY")
+JELLYFIN_USER_ID = _cfg("JELLYFIN_USER_ID")  # account whose Jellyfin watches count as "watched"
+
+
+def fetch_jellyfin_watched_movies():
+    """Movies marked Played on the configured Jellyfin user account, as {tmdb_id: title}.
+
+    Makes a Jellyfin watch a first-class 'watched' source so films watched only in
+    Jellyfin (never logged to Letterboxd/Simkl) are still detected. Without this,
+    Jellyfin/Jellystat are badge-only and such watches are invisible to Trimbin.
+    """
+    out = {}
+    if not (JELLYFIN_URL and JELLYFIN_API_KEY and JELLYFIN_USER_ID):
+        return out
+    try:
+        url = (f"{JELLYFIN_URL}/Users/{JELLYFIN_USER_ID}/Items?isPlayed=true"
+               f"&includeItemTypes=Movie&recursive=true&fields=ProviderIds")
+        data = api_json(url, headers={"X-Emby-Token": JELLYFIN_API_KEY})
+        for item in data.get("Items", []):
+            tmdb = item.get("ProviderIds", {}).get("Tmdb")
+            if tmdb:
+                try:
+                    out[int(tmdb)] = item.get("Name", "")
+                except (TypeError, ValueError):
+                    pass
+    except Exception as e:
+        log.warning("jellyfin watched-movies query failed: %s", e)
+    return out
 
 
 def jellyfin_lookup_by_tmdb(tmdb_id):
@@ -674,10 +701,12 @@ def _scan():
     lb_likes = scrape_letterboxd_likes() if auto_ignore_liked else set()
     simkl_watched = fetch_simkl_movies()
     trakt_watched = _fetch_trakt_movies()  # no-op unless TRAKT_CLIENT_ID + TRAKT_USERNAME are set
+    jf_watched = fetch_jellyfin_watched_movies()  # no-op unless JELLYFIN_USER_ID is set
 
-    all_watched_tmdb = set(lb_watched.keys()) | set(simkl_watched.keys()) | set(trakt_watched.keys())
-    log.info("total unique watched movies: %d (LB=%d, Simkl=%d, Trakt=%d)",
-             len(all_watched_tmdb), len(lb_watched), len(simkl_watched), len(trakt_watched))
+    all_watched_tmdb = (set(lb_watched.keys()) | set(simkl_watched.keys())
+                        | set(trakt_watched.keys()) | set(jf_watched.keys()))
+    log.info("total unique watched movies: %d (LB=%d, Simkl=%d, Trakt=%d, Jellyfin=%d)",
+             len(all_watched_tmdb), len(lb_watched), len(simkl_watched), len(trakt_watched), len(jf_watched))
 
     if not all_watched_tmdb and LB_USER:
         log.error("no watched films found from any source, aborting")
@@ -703,6 +732,8 @@ def _scan():
                 sources.append("simkl")
             if tmdb_id in trakt_watched:
                 sources.append("trakt")
+            if tmdb_id in jf_watched:
+                sources.append("jellyfin")
 
             watch_count, watched_by = 0, []
             if JELLYSTAT_URL:

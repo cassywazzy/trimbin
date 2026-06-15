@@ -16,9 +16,10 @@ Media cleanup tool for the *arr ecosystem. Monitors your watched lists across mu
 - **Tabbed UI** — separate Movies and Shows tabs with progress bars for episode completion
 - **Storage Explorer** — zoomable D3 treemap + sortable tree list of your libraries, with By Size / Age / Type / AI views and optional local-LLM (Ollama) keep/delete recommendations
 - **Duplicate finder** — flags the same movie or series stored more than once (including the same show across `/tv` and `/anime`), with quality / codec / audio / size shown per copy
-- **Orphan & junk cleanup** — finds OS junk, empty dirs, scene/release leftovers, samples, and orphan sidecar files with a 3-tier safety model
+- **Orphan & junk cleanup** — finds OS junk, empty dirs, scene/release leftovers, samples, and orphan sidecar files in your media libraries, with a 3-tier safety model
+- **Torrent orphans** — finds files in your qBittorrent download root that no torrent points at anymore, showing **real on-disk size vs. the (often huge) pre-allocated size** so sparse failed downloads aren't mistaken for real space. Guarded deletes are re-verified against qBittorrent before removing anything
 - **Trickplay scan** — flags oversized or video-containing `.trickplay` directories
-- **Tdarr stats** — a Tdarr tab with cumulative transcode savings and a per-library breakdown (cached, so it still shows numbers when Tdarr is offline)
+- **Transcode stats** — an Unmanic tab with live transcode activity (counts + recent filenames), cached so it still shows the last sync when Unmanic is offline
 - **Storage pool health** — an always-visible header gauge showing how full the media pool is (used / free / %, color-coded by safety level)
 - **Update checker** — a header badge that flags when a newer version is published on the GitHub project
 - **Live scan progress** — long scans show a progress bar + the current directory instead of a dead spinner, with an optional nightly auto-scan (`AUTO_SCAN_TIME`)
@@ -68,7 +69,8 @@ The status server provides a dark-themed dashboard at port 5380:
 | POST | `/api/unignore/<tmdb_id>` | Remove movie from ignore list |
 | GET/POST | `/api/settings` | View/save integration settings |
 | POST | `/api/scan` | Run the watch-list scanner now |
-| POST | `/api/scan-dedup` · `/api/scan-trickplay` · `/api/scan-cleanup` · `/api/scan-tree` | Run a storage scan |
+| POST | `/api/scan-dedup` · `/api/scan-trickplay` · `/api/scan-cleanup` · `/api/scan-tree` · `/api/scan-orphans` | Run a storage scan |
+| POST | `/api/orphan-delete/<hash>` · `/api/orphan-delete-tier/<tier>` | Delete a torrent orphan (download-root guarded + qBit re-verified) |
 | GET | `/api/tree` | Cached tree-scan data for the Explorer treemap |
 | GET | `/api/explorer/lookup?path=` · `/api/explorer/quality-profiles` | Resolve a path to Radarr/Sonarr · list quality profiles |
 | POST | `/api/explorer/set-quality` | Change a movie/show quality profile (optionally search) |
@@ -143,10 +145,12 @@ python cleanup-notify.py     # Run a scan
 | Variable | Description |
 |----------|-------------|
 | `QBIT_URL` | qBittorrent Web UI URL (e.g. `http://qbittorrent:8080`) |
-| `QBIT_USERNAME` | qBittorrent username (default: `admin`) |
+| `QBIT_USERNAME` | qBittorrent username (leave blank if the host is auth-whitelisted) |
 | `QBIT_PASSWORD` | qBittorrent password |
+| `QBIT_DELETE_FILES` | On trim, also delete the downloaded files (`true`, default) or remove the listing only (`false`) |
+| `QBIT_DOWNLOAD_ROOT` | Download root as the container sees it (e.g. `/downloads`) — required for the **Torrent Orphans** tab; bind-mount that directory to this path |
 
-When configured, trimming a movie/show also removes the associated torrent(s) from qBittorrent (torrent entry only — files are already deleted by Radarr/Sonarr). If you run multiple qBit instances, point this at your main one (not a dedicated seeding instance).
+When configured, trimming a movie/show also removes the associated torrent(s) from qBittorrent. If you run multiple qBit instances, point this at your main one (not a dedicated seeding instance). The **Torrent Orphans** tab additionally needs `QBIT_DOWNLOAD_ROOT` set and the download directory bind-mounted, so it can enumerate and (optionally) delete untracked files there.
 
 ### Sonarr integration
 

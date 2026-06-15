@@ -12,6 +12,9 @@ services:
       # Read-write is needed for trim/delete; use :ro if you only want scans.
       # Example — edit to match your setup:
       # - /srv/media:/media
+      # For the Orphans tab, also mount your qBittorrent download root at the
+      # path you set in QBIT_DOWNLOAD_ROOT (read-write, so orphans can be deleted):
+      # - /srv/downloads:/downloads
     env_file:
       - .env
 

@@ -11,6 +11,7 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+import http.cookiejar
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
@@ -54,19 +55,24 @@ CONFIG_KEYS = [
     ("OLLAMA_MODEL", "Ollama model name (e.g. llama3.1:8b)", "ai"),
     ("OLLAMA_TEMPERATURE", "AI temperature (0.0-1.0, lower=more focused)", "ai"),
     ("OLLAMA_TIMEOUT", "AI request timeout in seconds", "ai"),
-    ("TDARR_URL", "Tdarr API URL (container-reachable, e.g. http://tdarr-host:8265)", "tdarr"),
-    ("TDARR_BROWSER_URL", "Tdarr browser URL (for the UI link, e.g. https://tdarr.example.com)", "tdarr"),
+    ("UNMANIC_URL", "Unmanic API URL (container-reachable, e.g. http://unmanic-host:8888)", "unmanic"),
+    ("UNMANIC_BROWSER_URL", "Unmanic browser URL (for the UI link, e.g. https://unmanic.example.com)", "unmanic"),
     ("NETDATA_URL", "Netdata URL (optional — raw pool stats enrichment)", "scans"),
     ("AUTO_SCAN_TIME", "Auto-scan daily at HH:MM, 24h (blank = off)", "scans"),
     ("AUTO_SCAN_STORAGE", "Auto-scan also runs storage scans (true/false)", "scans"),
     ("GITHUB_REPO", "GitHub repo for update checks (owner/name)", "about"),
+    ("QBIT_URL", "qBittorrent WebUI URL (container-reachable, e.g. http://qbittorrent:8080)", "qbit"),
+    ("QBIT_USERNAME", "qBittorrent username (leave blank if the host is auth-whitelisted)", "qbit"),
+    ("QBIT_PASSWORD", "qBittorrent password", "qbit"),
+    ("QBIT_DELETE_FILES", "On trim, also delete the downloaded files", "qbit"),
+    ("QBIT_DOWNLOAD_ROOT", "qBittorrent download root as the container sees it (e.g. /downloads) — used by the Orphans scan", "qbit"),
 ]
 
-SELECT_KEYS = {"LB_AUTO_IGNORE_LIKED", "LB_MIN_RATING_IGNORE"}
+SELECT_KEYS = {"LB_AUTO_IGNORE_LIKED", "LB_MIN_RATING_IGNORE", "QBIT_DELETE_FILES"}
 
 SENSITIVE_KEYS = {"RADARR_API_KEY", "SONARR_API_KEY", "SIMKL_CLIENT_ID",
                   "SIMKL_ACCESS_TOKEN", "JELLYSTAT_API_KEY", "JELLYFIN_API_KEY",
-                  "DISCORD_WEBHOOK_URL", "HC_PING_URL"}
+                  "DISCORD_WEBHOOK_URL", "HC_PING_URL", "QBIT_PASSWORD"}
 
 
 def load_json(path, default):
@@ -82,14 +88,36 @@ def save_json(path, data):
     tmp.replace(path)
 
 
+def _progress_path(scan_type):
+    """Per-scan-type progress file (mirrors trimbin_common._progress_path)."""
+    return DATA_DIR / f"scan_progress_{scan_type}.json"
+
+
 def _progress_start(scan_type):
     """Bracket the start of a scan so the UI shows progress immediately."""
-    save_json(PROGRESS_FILE, {"active": True, "type": scan_type, "phase": "starting",
-                              "done": 0, "total": 0, "current": "", "updated": time.time()})
+    save_json(_progress_path(scan_type), {"active": True, "type": scan_type, "phase": "starting",
+                                          "done": 0, "total": 0, "current": "", "updated": time.time()})
 
 
 def _progress_done(scan_type):
-    save_json(PROGRESS_FILE, {"active": False, "type": scan_type, "updated": time.time()})
+    try:
+        _progress_path(scan_type).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _scan_progress():
+    """Aggregate per-type progress files into the list of currently-active scans,
+    so the UI can stack concurrent scans instead of one bar jumping between them.
+    Records not updated within 20s are treated as stale (crashed scanner) and dropped."""
+    now = time.time()
+    scans = []
+    for p in sorted(DATA_DIR.glob("scan_progress_*.json")):
+        rec = load_json(p, None)
+        if not rec or not rec.get("active") or now - rec.get("updated", 0) > 20:
+            continue
+        scans.append(rec)
+    return {"active": bool(scans), "scans": scans}
 
 
 def get_config(key):
@@ -345,12 +373,13 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 .pool-fill{height:100%;border-radius:7px;transition:width .4s}
 .pool-sub{font-size:.72em;color:#666;margin-top:3px}
 .pool-loading{color:#666;font-size:.85em}
-.tdarr-cards{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px}
-.tdarr-card{background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:16px 20px;flex:1;min-width:120px;text-align:center}
-.tdarr-card .value{font-size:1.8em;font-weight:700;color:#00d474}
-.tdarr-card .label{font-size:.75em;color:#888;margin-top:4px}
-.tdarr-offline{background:#e9456022;border:1px solid #e9456044;color:#e94560;padding:8px 14px;border-radius:6px;font-size:.82em;margin-bottom:12px}
-.tdarr-warn{background:#f39c1211;border:1px solid #f39c1233;color:#f39c12;padding:8px 14px;border-radius:6px;font-size:.78em;margin-bottom:12px;white-space:pre-line}
+.umc-cards{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px}
+.umc-card{background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:16px 20px;flex:1;min-width:110px;text-align:center}
+.umc-card .value{font-size:1.8em;font-weight:700;color:#00d474}
+.umc-card .label{font-size:.75em;color:#888;margin-top:4px}
+.umc-offline{background:#e9456022;border:1px solid #e9456044;color:#e94560;padding:8px 14px;border-radius:6px;font-size:.82em;margin-bottom:12px}
+.umc-warn{background:#f39c1211;border:1px solid #f39c1233;color:#f39c12;padding:8px 14px;border-radius:6px;font-size:.78em;margin-bottom:12px;white-space:pre-line}
+.umc-fail{color:#e94560}
 .scan-panel{display:none;position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:14px 18px;z-index:150;min-width:340px;max-width:90vw;box-shadow:0 4px 20px rgba(0,0,0,.6)}
 .scan-panel.active{display:block}
 .scan-panel .sp-title{font-size:.85em;color:#00d474;font-weight:600;margin-bottom:8px;display:flex;justify-content:space-between;gap:12px}
@@ -360,6 +389,7 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 .scan-fill.indet{width:35%;animation:indet 1.1s ease-in-out infinite}
 @keyframes indet{0%{margin-left:-35%}100%{margin-left:100%}}
 .scan-panel .sp-current{font-size:.72em;color:#666;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;direction:rtl;text-align:left}
+.scan-panel .sp-row + .sp-row{margin-top:12px;padding-top:12px;border-top:1px solid #0f3460}
 @media(max-width:600px){
   .summary{gap:8px}
   .stat{padding:10px 6px;min-width:70px}
@@ -413,8 +443,9 @@ function switchTab(name) {
 <div class="tab" data-tab="duplicates" onclick="switchTab('duplicates')">Duplicates</div>
 <div class="tab" data-tab="trickplay" onclick="switchTab('trickplay')">Trickplay</div>
 <div class="tab" data-tab="cleanup" onclick="switchTab('cleanup')">Cleanup</div>
+<div class="tab" data-tab="orphans" onclick="switchTab('orphans')">Orphans</div>
 <div class="tab" data-tab="explorer" onclick="switchTab('explorer')">Explorer</div>
-<div class="tab" data-tab="tdarr" onclick="switchTab('tdarr')">Tdarr</div>
+<div class="tab" data-tab="unmanic" onclick="switchTab('unmanic')">Unmanic</div>
 <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -440,17 +471,21 @@ $trickplay_html
 $cleanup_html
 </div>
 
+<div id="tab-orphans" class="tab-content">
+$orphans_html
+</div>
+
 <div id="tab-explorer" class="tab-content">
 $explorer_html
 </div>
 
-<div id="tab-tdarr" class="tab-content">
+<div id="tab-unmanic" class="tab-content">
 <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;margin-top:12px">
-<h2 style="margin:0;border:none;padding:0">Tdarr Transcodes</h2>
-<button class="refresh-btn" onclick="loadTdarr(this)">Refresh</button>
-<span id="tdarr-status" style="color:#666;font-size:.8em"></span>
+<h2 style="margin:0;border:none;padding:0">Unmanic Transcodes</h2>
+<button class="refresh-btn" onclick="loadUnmanic(this)">Refresh</button>
+<span id="unmanic-status" style="color:#666;font-size:.8em"></span>
 </div>
-<div id="tdarr-body"><div class="empty">Loading&hellip;</div></div>
+<div id="unmanic-body"><div class="empty">Loading&hellip;</div></div>
 </div>
 
 <div id="tab-settings" class="tab-content">
@@ -469,9 +504,7 @@ $settings_html
 </div>
 <div class="toast" id="toast"></div>
 <div class="scan-panel" id="scanPanel">
-<div class="sp-title"><span id="sp-label">Scanning&hellip;</span><span class="sp-count" id="sp-count"></span></div>
-<div class="scan-track"><div class="scan-fill" id="sp-fill"></div></div>
-<div class="sp-current" id="sp-current"></div>
+<div id="sp-list"></div>
 </div>
 
 <script>
@@ -537,7 +570,7 @@ function executeTrim() {
           showToast(msg);
           setTimeout(function(){ reloadToTab('cleanup'); }, 800);
         } else {
-          showToast('Deleted: ' + title);
+          showToast('Deleted: ' + title + (d.detail && d.detail !== 'ok' ? ' — ' + d.detail : ''));
           if (row) {
             row.style.transition = 'opacity 0.3s'; row.style.opacity = '0';
             setTimeout(function(){
@@ -657,43 +690,80 @@ function showToast(msg) {
 
 /* === Live scan progress (polls /api/scan-progress so long scans aren't a dead spinner) === */
 var scanPoll = null;
-var SCAN_LABELS = {tree: 'Storage Explorer scan', dedup: 'Duplicate scan', trickplay: 'Trickplay scan', cleanup: 'Cleanup scan', main: 'Library scan'};
-function setScanProgress(p) {
-  var label = document.getElementById('sp-label');
-  var count = document.getElementById('sp-count');
-  var fill = document.getElementById('sp-fill');
-  var cur = document.getElementById('sp-current');
-  if (!label) return;
-  label.textContent = SCAN_LABELS[p.type] || 'Scanning…';
+var scanStartedAt = 0;
+var SCAN_LABELS = {tree: 'Storage Explorer scan', dedup: 'Duplicate scan', trickplay: 'Trickplay scan', cleanup: 'Cleanup scan', orphans: 'Torrent orphans scan', main: 'Library scan'};
+// Create or update one progress row (keyed by scan type) without disturbing the
+// others — so concurrent scans stack, and an indeterminate bar's animation isn't
+// restarted every poll.
+function upsertScanRow(p) {
+  var list = document.getElementById('sp-list');
+  if (!list) return;
+  var row = list.querySelector('[data-type="' + p.type + '"]');
+  if (!row) {
+    row = document.createElement('div');
+    row.className = 'sp-row';
+    row.setAttribute('data-type', p.type);
+    row.innerHTML = '<div class="sp-title"><span class="sp-label"></span><span class="sp-count"></span></div>'
+                  + '<div class="scan-track"><div class="scan-fill"></div></div>'
+                  + '<div class="sp-current"></div>';
+    list.appendChild(row);
+  }
   var phase = (p.phase && p.phase !== 'scanning') ? p.phase : '';
+  var fill = row.querySelector('.scan-fill');
+  var count = row.querySelector('.sp-count');
+  row.querySelector('.sp-label').textContent = SCAN_LABELS[p.type] || 'Scanning…';
   if (p.total && p.total > 0) {
     var pct = Math.min(100, Math.round((p.done || 0) / p.total * 100));
-    fill.className = 'scan-fill';
+    if (fill.className !== 'scan-fill') fill.className = 'scan-fill';
     fill.style.width = pct + '%';
     count.textContent = (phase ? phase + ' · ' : '') + (p.done || 0).toLocaleString() + ' / ' + Number(p.total).toLocaleString() + ' (' + pct + '%)';
   } else {
-    fill.className = 'scan-fill indet';
-    fill.style.width = '35%';
+    if (fill.className !== 'scan-fill indet') { fill.className = 'scan-fill indet'; fill.style.width = '35%'; }
     count.textContent = phase || ((p.done || 0) > 0 ? Number(p.done).toLocaleString() + ' scanned' : 'working…');
   }
-  cur.textContent = p.current || '';
+  row.querySelector('.sp-current').textContent = p.current || '';
 }
+// Reconcile the rendered rows to the server's authoritative list (upsert each,
+// prune any that finished). Hides the panel when nothing is running.
+function renderScans(scans) {
+  var list = document.getElementById('sp-list');
+  var panel = document.getElementById('scanPanel');
+  if (!list) return;
+  var seen = {};
+  (scans || []).forEach(function(p) { seen[p.type] = 1; upsertScanRow(p); });
+  Array.prototype.slice.call(list.children).forEach(function(row) {
+    if (!seen[row.getAttribute('data-type')]) row.remove();
+  });
+  if (!list.children.length && panel) panel.classList.remove('active');
+}
+function pollScans() {
+  fetch('/api/scan-progress').then(function(r){ return r.json(); }).then(function(d) {
+    var scans = (d && d.scans) ? d.scans : [];
+    if (scans.length) {
+      renderScans(scans);
+      var panel = document.getElementById('scanPanel');
+      if (panel) panel.classList.add('active');
+      if (!scanPoll) scanPoll = setInterval(pollScans, 700);
+    } else if (Date.now() - scanStartedAt > 3000) {
+      // Grace window expired with nothing running → clear the stack and stop.
+      renderScans([]);
+      if (scanPoll) { clearInterval(scanPoll); scanPoll = null; }
+    }
+  }).catch(function(){});
+}
+// Called when a scan is kicked off: show the panel + an optimistic row, and make
+// sure the shared poller is running. The poller (server truth) drives everything
+// else, so a second scan starting never disturbs the first's bar.
 function startScanProgress(type) {
+  scanStartedAt = Date.now();
   var panel = document.getElementById('scanPanel');
   if (panel) panel.classList.add('active');
-  setScanProgress({active: true, type: type, phase: 'starting'});
-  if (scanPoll) clearInterval(scanPoll);
-  scanPoll = setInterval(function() {
-    fetch('/api/scan-progress').then(function(r){ return r.json(); }).then(function(p) {
-      if (p && p.active) setScanProgress(p);
-    }).catch(function(){});
-  }, 700);
+  upsertScanRow({type: type, phase: 'starting'});
+  if (!scanPoll) scanPoll = setInterval(pollScans, 700);
 }
-function stopScanProgress() {
-  if (scanPoll) { clearInterval(scanPoll); scanPoll = null; }
-  var panel = document.getElementById('scanPanel');
-  if (panel) panel.classList.remove('active');
-}
+// A scan's fetch finished — don't hide directly (another scan may still run);
+// just poll so the panel reconciles to whatever is still active.
+function stopScanProgress() { pollScans(); }
 
 /* === Explorer: D3 Treemap + Tree List + AI === */
 var explorerData = null;
@@ -1108,7 +1178,7 @@ function explorerTrimByPath(path, name, node) {
       }
       var trimUrl = d.type === 'movie' ? '/api/trim/' + d.tmdbId : '/api/trim-show/' + d.id;
       fetch(trimUrl, {method: 'POST'}).then(function(r) { return r.json(); }).then(function(r) {
-        if (r.ok) { showToast('Trimmed: ' + d.title); removeNodeFromTree(node); }
+        if (r.ok) { showToast('Trimmed: ' + d.title + (r.detail && r.detail !== 'ok' ? ' — ' + r.detail : '')); removeNodeFromTree(node); }
         else { showToast('Trim error: ' + (r.error || 'unknown')); }
       });
     })
@@ -1316,69 +1386,72 @@ function loadVersion() {
   }).catch(function() {});
 }
 
-/* === Tdarr tab === */
-var tdarrLoaded = false;
-function fmtTs(ms) { if (!ms) return ''; try { return new Date(ms).toISOString().slice(0, 10); } catch (e) { return ''; } }
-function renderTdarr(d) {
-  var body = document.getElementById('tdarr-body');
-  var status = document.getElementById('tdarr-status');
+/* === Unmanic tab === */
+var unmanicLoaded = false;
+function fmtUmcDate(sec) { if (!sec) return ''; try { return new Date(sec * 1000).toISOString().slice(0, 16).replace('T', ' '); } catch (e) { return ''; } }
+function renderUnmanic(d) {
+  var body = document.getElementById('unmanic-body');
+  var status = document.getElementById('unmanic-status');
   if (!body) return;
   if (!d || d.configured === false) {
-    body.innerHTML = '<div class="empty">Tdarr isn\\'t configured. Add <b>Tdarr API URL</b> in Settings (e.g. http://tdarr-host:8265).</div>';
+    body.innerHTML = '<div class="empty">Unmanic isn\\'t configured. Add <b>Unmanic API URL</b> in Settings (e.g. http://unmanic-host:8888).</div>';
     if (status) status.textContent = '';
     return;
   }
   var html = '';
   if (d.online === false) {
-    html += '<div class="tdarr-offline">Tdarr is offline' + (d.synced_at ? ' &mdash; showing last sync (' + escHtml(d.synced_at) + ')' : '') + '. Numbers refresh when Tdarr is running.</div>';
+    html += '<div class="umc-offline">Unmanic is unreachable' + (d.synced_at ? ' &mdash; showing last sync (' + escHtml(d.synced_at) + ')' : '') + '. Numbers refresh when Unmanic responds.</div>';
     if (status) status.textContent = 'offline';
   } else if (status) { status.textContent = 'synced ' + (d.synced_at || ''); }
-  html += '<div class="tdarr-cards">'
-    + '<div class="tdarr-card"><div class="value">' + (d.gb_saved != null ? d.gb_saved + ' GB' : '—') + '</div><div class="label">Space saved</div></div>'
-    + '<div class="tdarr-card"><div class="value">' + (d.transcodes != null ? d.transcodes : '—') + '</div><div class="label">Transcode events</div></div>'
-    + '<div class="tdarr-card"><div class="value">' + (d.files != null ? Number(d.files).toLocaleString() : '—') + '</div><div class="label">Files tracked</div></div>'
-    + '<div class="tdarr-card"><div class="value">' + (d.health_checks != null ? Number(d.health_checks).toLocaleString() : '—') + '</div><div class="label">Health checks</div></div>'
+  var workersTxt = (d.workers != null) ? ((d.workers_busy || 0) + ' / ' + d.workers) : '—';
+  html += '<div class="umc-cards">'
+    + '<div class="umc-card"><div class="value">' + (d.transcodes != null ? Number(d.transcodes).toLocaleString() : '—') + '</div><div class="label">Transcodes</div></div>'
+    + '<div class="umc-card"><div class="value' + (d.failed ? ' umc-fail' : '') + '">' + (d.failed != null ? Number(d.failed).toLocaleString() : '—') + '</div><div class="label">Failed</div></div>'
+    + '<div class="umc-card"><div class="value">' + (d.queued != null ? Number(d.queued).toLocaleString() : '—') + '</div><div class="label">Queued</div></div>'
+    + '<div class="umc-card"><div class="value">' + workersTxt + '</div><div class="label">Workers busy</div></div>'
     + '</div>';
-  if (d.note) { html += '<div class="tdarr-warn" style="color:#9bb;border-color:#0f3460;background:#0f346033">' + escHtml(d.note) + '</div>'; }
-  if (d.warning) { html += '<div class="tdarr-warn">' + escHtml(d.warning) + '</div>'; }
-  var bl = d.by_library || [];
-  if (bl.length) {
-    html += '<h2 style="font-size:1em;color:#ccc;border:none;margin:18px 0 8px">Savings by library</h2>';
-    html += '<table><thead><tr><th>Library</th><th>Transcode events</th><th>Saved</th></tr></thead><tbody>';
-    bl.forEach(function(e) {
-      html += '<tr><td>' + escHtml(e.library || '?') + '</td><td>' + (e.events != null ? e.events : '') + '</td>'
-        + '<td class="size">' + (e.saved_gb != null ? Number(e.saved_gb).toFixed(2) + ' GB' : '') + '</td></tr>';
+  var rc = d.recent || [];
+  if (rc.length) {
+    html += '<h2 style="font-size:1em;color:#ccc;border:none;margin:18px 0 8px">Recent transcodes</h2>';
+    html += '<table><thead><tr><th>File</th><th>Result</th><th>Finished</th></tr></thead><tbody>';
+    rc.forEach(function(e) {
+      html += '<tr><td>' + escHtml(e.label || '?') + '</td>'
+        + '<td>' + (e.success ? '<span style="color:#00d474">&#10003; success</span>' : '<span class="umc-fail">&#10007; failed</span>') + '</td>'
+        + '<td class="size">' + escHtml(fmtUmcDate(e.finished)) + '</td></tr>';
     });
     html += '</tbody></table>';
+  } else if (d.online !== false) {
+    html += '<div class="empty" style="margin-top:16px">No completed transcodes yet. Tasks appear here once Unmanic processes a library.</div>';
   }
   html += '<p style="font-size:.75em;color:#666;margin-top:12px">';
-  if (d.browser_url) { html += '<a class="arr-link" href="' + (d.browser_url || '').replace(/"/g, '%22') + '" target="_blank" rel="noopener">Open Tdarr</a> '; }
-  html += 'Tdarr\\'s log records space saved per transcode but <b>not the filename</b>, and its per-file database is currently empty &mdash; a per-file list will populate here once Tdarr is transcoding in production.</p>';
+  if (d.browser_url) { html += '<a class="arr-link" href="' + (d.browser_url || '').replace(/"/g, '%22') + '" target="_blank" rel="noopener">Open Unmanic</a> '; }
+  html += 'Unmanic reports task counts and filenames, but <b>not per-file space savings</b> (its history stores no before/after sizes), so there is no &ldquo;space saved&rdquo; figure.</p>';
   body.innerHTML = html;
 }
-function loadTdarr(btn) {
+function loadUnmanic(btn) {
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spin">&#x21bb;</span> Loading...'; }
-  fetch('/api/tdarr/stats').then(function(r) { return r.json(); }).then(function(d) {
-    renderTdarr(d); tdarrLoaded = true;
+  fetch('/api/unmanic/stats').then(function(r) { return r.json(); }).then(function(d) {
+    renderUnmanic(d); unmanicLoaded = true;
   }).catch(function(e) {
-    var body = document.getElementById('tdarr-body'); if (body) body.innerHTML = '<div class="empty">Error: ' + escHtml(String(e)) + '</div>';
+    var body = document.getElementById('unmanic-body'); if (body) body.innerHTML = '<div class="empty">Error: ' + escHtml(String(e)) + '</div>';
   }).finally(function() { if (btn) { btn.disabled = false; btn.textContent = 'Refresh'; } });
 }
 
-// Init explorer/tdarr when their tab is shown; load header widgets on page load
+// Init explorer/unmanic when their tab is shown; load header widgets on page load
 (function() {
   var origSwitch = switchTab;
   switchTab = function(name) {
     origSwitch(name);
     if (name === 'explorer' && !explorerData) { initExplorer(); checkAiStatus(); }
-    if (name === 'tdarr' && !tdarrLoaded) { loadTdarr(); }
+    if (name === 'unmanic' && !unmanicLoaded) { loadUnmanic(); }
   };
   // Re-check hash after override is in place
   var h = window.location.hash.replace('#', '');
   if (h === 'explorer') { initExplorer(); checkAiStatus(); }
-  if (h === 'tdarr') { loadTdarr(); }
+  if (h === 'unmanic') { loadUnmanic(); }
   loadPoolHealth();
   loadVersion();
+  pollScans();  // resume the progress stack if a scan is still running (e.g. after a reload)
 })();
 </script>
 </body></html>""")
@@ -1503,12 +1576,13 @@ def build_settings_html():
         "scans": "Storage Scans",
         "auto_ignore": "Auto-Ignore",
         "ai": "AI (Ollama)",
-        "tdarr": "Tdarr",
+        "unmanic": "Unmanic",
+        "qbit": "qBittorrent",
         "about": "Updates",
     }
 
     parts = ['<form id="settingsForm" class="settings-form" onsubmit="event.preventDefault();saveSettings()">']
-    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications", "scans", "auto_ignore", "ai", "tdarr", "about"]:
+    for group_key in ["letterboxd", "radarr", "sonarr", "simkl", "jellystat", "notifications", "scans", "auto_ignore", "ai", "unmanic", "qbit", "about"]:
         if group_key not in groups:
             continue
         parts.append(f'<div class="settings-group"><h3>{group_titles.get(group_key, group_key)}</h3>')
@@ -1550,6 +1624,20 @@ def build_settings_html():
                     f'{"".join(opts)}'
                     f'</select></div>'
                 )
+            elif key == "QBIT_DELETE_FILES":
+                # Default (unset) = delete files, since reclaiming space is the point of a trim.
+                sel_on = ' selected' if (val or "true") != "false" else ''
+                sel_off = ' selected' if val == "false" else ''
+                parts.append(
+                    f'<div class="field">'
+                    f'<span class="status-dot {dot_class}"></span>'
+                    f'<label>{html.escape(label)}</label>'
+                    f'<select data-key="{key}" style="flex:1;background:#0f3460;border:1px solid #1e2d4a;'
+                    f'border-radius:4px;padding:8px 12px;color:#e0e0e0;font-size:.85em">'
+                    f'<option value="true"{sel_on}>Delete files from disk</option>'
+                    f'<option value="false"{sel_off}>Remove torrent only (keep files)</option>'
+                    f'</select></div>'
+                )
             else:
                 is_sensitive = key in SENSITIVE_KEYS
                 input_type = "password" if is_sensitive else "text"
@@ -1573,6 +1661,7 @@ DEDUP_FILE = DATA_DIR / "dedup_scan.json"
 DEDUP_IGNORE_FILE = DATA_DIR / "dedup_ignore.json"
 TRICKPLAY_FILE = DATA_DIR / "trickplay_scan.json"
 CLEANUP_FILE = DATA_DIR / "cleanup_scan.json"
+ORPHAN_FILE = DATA_DIR / "orphan_scan.json"
 
 
 def path_hash(p):
@@ -1875,6 +1964,129 @@ def build_cleanup_html():
     return "\n".join(parts)
 
 
+# ── Torrent Orphans tab ──────────────────────────────────────────────────
+# Files in the qBittorrent download root that no torrent points at anymore.
+# We diff the download root against every torrent's content_path, and record
+# real on-disk size (st_blocks) alongside apparent size so sparse abandoned
+# downloads stop looking like 30 GB monsters. Deletes are guarded to the
+# download root AND re-verified against qBit (never delete a re-claimed file).
+
+ORPHAN_TIERS = {
+    "failed": {"label": "Abandoned / failed downloads",
+               "desc": "Allocated far larger than what's on disk — sparse partials with no torrent to resume. Safe to delete."},
+    "stub": {"label": "Empty leftovers",
+             "desc": "Tiny renamed-out folders and .torrent/.nfo cruft (under 1 MB). Safe to delete."},
+    "complete": {"label": "Complete, untracked content",
+                 "desc": "Real files with no torrent — this is the only download copy. It may already be imported to your library, but confirm before deleting."},
+}
+
+_ORPHAN_JS = """<script>
+function orphanDelete(ph, label) {
+  if (!confirm('Permanently delete orphan "' + label + '"?\\n\\nThis file is not tracked by any torrent. This cannot be undone.')) return;
+  fetch('/api/orphan-delete/' + ph, {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if (d.ok) { showToast('Deleted: ' + label); reloadToTab('orphans'); } else { showToast('Error: ' + (d.error || 'unknown')); } })
+    .catch(function(e){ showToast('Error: ' + e); });
+}
+function orphanDeleteTier(tier, count) {
+  if (!confirm('Delete all ' + count + ' orphans in this group?\\n\\nThis cannot be undone.')) return;
+  fetch('/api/orphan-delete-tier/' + tier, {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d){ if (d.ok) { showToast('Deleted ' + (d.deleted || 0) + ' items'); reloadToTab('orphans'); } else { showToast('Error: ' + (d.error || 'unknown')); } })
+    .catch(function(e){ showToast('Error: ' + e); });
+}
+</script>"""
+
+
+def _orphan_fmt(real, apparent):
+    """Real on-disk size, noting apparent (allocated) size when it's materially
+    larger — the whole point of this view."""
+    r = fmt_size(size_bytes=real)
+    if apparent > real * 1.5 and apparent - real > 50 * 1024 * 1024:
+        return f'{r} <span style="color:#777">/ {fmt_size(size_bytes=apparent)} alloc</span>'
+    return r
+
+
+def build_orphans_html():
+    parts = []
+    data = load_json(ORPHAN_FILE, {})
+    scan_time = data.get("last_scan", "never")
+    parts.append(
+        '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;margin-top:12px">'
+        '<h2 style="margin:0;border:none;padding:0">Torrent Orphans</h2>'
+        '<button class="refresh-btn" onclick="runStorageScan(\'orphans\', this)">Scan</button>'
+        f'<span style="color:#666;font-size:.8em">Last scan: {html.escape(scan_time)}</span>'
+        '</div>'
+        '<p style="color:#888;font-size:.82em;margin:0 0 12px">Files in the qBittorrent download root that no torrent points at anymore. '
+        'Sizes are real on-disk usage; qBit pre-allocates the full size, so a dead download can look huge while occupying almost nothing.</p>'
+    )
+    err = data.get("error")
+    items = data.get("items", [])
+    if err:
+        parts.append(f'<div class="empty">{html.escape(err)}</div>')
+        parts.append(_ORPHAN_JS)
+        return "\n".join(parts)
+    if not items:
+        parts.append('<div class="empty">No orphans found. Run a scan to check.</div>')
+        parts.append(_ORPHAN_JS)
+        return "\n".join(parts)
+
+    total_real = fmt_size(size_bytes=data.get("total_real_bytes", 0))
+    total_app = fmt_size(size_bytes=data.get("total_apparent_bytes", 0))
+    parts.append(
+        '<div style="background:#16213e;border:1px solid #0f3460;border-radius:8px;padding:12px 16px;margin-bottom:16px">'
+        f'<span style="font-size:1.1em;font-weight:700;color:#e94560">{data.get("total_items", 0)} orphans · {total_real} on disk</span>'
+        f'<span style="color:#777;margin-left:10px">({total_app} allocated)</span>'
+        '</div>'
+    )
+    grouped = {}
+    for it in items:
+        grouped.setdefault(it["tier"], []).append(it)
+
+    def render_section(title, tiers, badge_color, badge_text):
+        if not any(grouped.get(t) for t in tiers):
+            return
+        parts.append(
+            f'<h2 style="margin:20px 0 4px;border:none;padding:0;font-size:1em;color:#ccc">{title}'
+            f' <span class="badge" style="background:{badge_color};font-size:.7em;vertical-align:middle;margin-left:6px">{badge_text}</span></h2>'
+        )
+        for tier in tiers:
+            tier_items = grouped.get(tier, [])
+            if not tier_items:
+                continue
+            info = ORPHAN_TIERS.get(tier, {})
+            real_sum = sum(i["real_bytes"] for i in tier_items)
+            open_attr = " open" if tier in ("failed", "stub") else ""
+            parts.append(
+                f'<details style="margin:8px 0"{open_attr}>'
+                f'<summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0">'
+                f'<span style="color:#666;font-size:.85em" class="collapse-arrow">&#9654;</span>'
+                f'<span style="color:#ccc;font-weight:600;font-size:.9em">{html.escape(info.get("label", tier))}</span>'
+                f'<span style="color:#666;font-size:.8em">{len(tier_items)} items · {fmt_size(size_bytes=real_sum)} on disk</span>'
+                f'<button class="trim" style="font-size:.75em;padding:3px 10px" '
+                f'onclick="event.stopPropagation();orphanDeleteTier(\'{tier}\', {len(tier_items)})">Delete All</button>'
+                f'</summary>'
+                f'<p style="color:#666;font-size:.8em;margin:4px 0 8px 20px">{html.escape(info.get("desc", ""))}</p>'
+            )
+            parts.append('<table><thead><tr><th>Item</th><th>Size</th><th></th></tr></thead><tbody>')
+            for it in tier_items[:200]:
+                name = html.escape(it.get("name", "?"))
+                ph = path_hash(it.get("path", ""))
+                label_js = html.escape(it.get("name", "?").replace("\\", "\\\\").replace("'", "\\'").replace('"', '\\"'))
+                icon = "&#128193;" if it.get("is_dir") else "&#128196;"
+                parts.append(
+                    f'<tr><td>{icon} {name}</td>'
+                    f'<td class="size">{_orphan_fmt(it.get("real_bytes", 0), it.get("apparent_bytes", 0))}</td>'
+                    f'<td class="actions"><button class="trim" onclick="orphanDelete(\'{ph}\', \'{label_js}\')">Delete</button></td></tr>'
+                )
+            parts.append('</tbody></table></details>')
+
+    render_section("Safe to delete", ["failed", "stub"], "#00d474", "SAFE")
+    render_section("Review before deleting", ["complete"], "#e6a817", "CAUTION")
+    parts.append(_ORPHAN_JS)
+    return "\n".join(parts)
+
+
 def arr_api(base_url, api_key, method, path, body=None):
     url = f"{base_url}/api/v3{path}"
     data = json.dumps(body).encode() if body else None
@@ -1885,6 +2097,85 @@ def arr_api(base_url, api_key, method, path, body=None):
     if resp.status == 200 and method == "GET":
         return json.loads(resp.read())
     return None
+
+
+# ── qBittorrent integration ──────────────────────────────────────────────
+# When a movie/show is trimmed, also remove the torrent the *arr app grabbed
+# for it so the seeding copy in the download dir is reclaimed too. Torrents are
+# matched by hash: the *arr "downloadId" recorded in history IS the qBittorrent
+# torrent hash. Only torrents the *arr app recorded for the trimmed item are
+# touched — manual or unrelated torrents (e.g. MAM) are never matched.
+
+def _qbit_login():
+    """Return (base_url, opener) for the qBittorrent WebUI, or (None, None) when
+    QBIT_URL is unset. Logs in when a username is configured; otherwise relies on
+    the client's auth-subnet whitelist. Raises RuntimeError on a hard login fail."""
+    base = get_config("QBIT_URL").rstrip("/")
+    if not base:
+        return None, None
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    user = get_config("QBIT_USERNAME")
+    if user:
+        data = urllib.parse.urlencode(
+            {"username": user, "password": get_config("QBIT_PASSWORD")}).encode()
+        req = urllib.request.Request(base + "/api/v2/auth/login", data=data, method="POST")
+        req.add_header("Referer", base)
+        body = opener.open(req, timeout=15).read().decode(errors="replace").strip()
+        if body != "Ok.":
+            raise RuntimeError("login rejected (check qBittorrent username/password)")
+    return base, opener
+
+
+def _arr_download_ids(base_url, api_key, kind, arr_id):
+    """qBittorrent hashes (the *arr 'downloadId') recorded for this movie/series.
+    Best-effort — returns [] if history can't be read, so a trim never aborts."""
+    path = (f"/history/movie?movieId={arr_id}" if kind == "movie"
+            else f"/history/series?seriesId={arr_id}")
+    try:
+        records = arr_api(base_url, api_key, "GET", path) or []
+    except Exception:
+        return []
+    ids = []
+    for rec in records:
+        did = (rec.get("downloadId") or "").lower()
+        if did and did not in ids:
+            ids.append(did)
+    return ids
+
+
+def qbit_delete(hashes):
+    """Best-effort: delete the given torrents (by hash) from qBittorrent. Returns
+    a short string for the UI toast (empty when the integration is off). Never
+    raises — a qBit failure must not undo an already-completed *arr trim."""
+    if not get_config("QBIT_URL"):
+        return ""                                   # integration off → stay silent
+    hashes = [h.lower() for h in hashes if h]
+    if not hashes:
+        return "qBit: no download record to match"
+    try:
+        base, opener = _qbit_login()
+        info = json.loads(opener.open(
+            urllib.request.Request(base + "/api/v2/torrents/info"), timeout=20).read())
+        present = {t["hash"].lower(): t for t in info}
+        matched = [h for h in hashes if h in present]
+        if not matched:
+            return "qBit: torrent already gone"
+        delete_files = (get_config("QBIT_DELETE_FILES") or "true").lower() != "false"
+        freed = sum(present[h].get("size", 0) for h in matched)
+        data = urllib.parse.urlencode(
+            {"hashes": "|".join(matched),
+             "deleteFiles": "true" if delete_files else "false"}).encode()
+        req = urllib.request.Request(base + "/api/v2/torrents/delete", data=data, method="POST")
+        req.add_header("Referer", base)
+        opener.open(req, timeout=20)
+        n = len(matched)
+        plural = "s" if n != 1 else ""
+        if delete_files:
+            return f"qBit: removed {n} torrent{plural} (+{round(freed / (1024**3), 1)} GB)"
+        return f"qBit: removed {n} torrent{plural} (kept files)"
+    except Exception as e:
+        return f"qBit error: {e}"
 
 
 def trim_movie(tmdb_id):
@@ -1901,8 +2192,11 @@ def trim_movie(tmdb_id):
 
     title = target.get("title", "Unknown")
     size_gb = round(target.get("sizeOnDisk", 0) / (1024**3), 1)
+    # Capture the grabbed torrent hash(es) before Radarr wipes the movie's history.
+    dl_hashes = _arr_download_ids(radarr_url, radarr_key, "movie", target["id"])
     arr_api(radarr_url, radarr_key, "DELETE",
             f"/movie/{target['id']}?deleteFiles=true&addImportExclusion=false")
+    qbit_note = qbit_delete(dl_hashes)
 
     movies_list = load_json(WATCHED_LIST_FILE, [])
     movies_list = [m for m in movies_list if m.get("tmdb_id") != tmdb_id]
@@ -1914,7 +2208,7 @@ def trim_movie(tmdb_id):
     save_json(DATA_DIR / "trimbin_trimmed.json", trimmed)
     log_trim(title, size_gb, "movie")
 
-    return True, "ok"
+    return True, qbit_note or "ok"
 
 
 def trim_show(sonarr_id):
@@ -1931,8 +2225,11 @@ def trim_show(sonarr_id):
 
     title = target.get("title", "Unknown")
     size_gb = round(target.get("statistics", {}).get("sizeOnDisk", 0) / (1024**3), 1)
+    # Capture every grabbed torrent hash before Sonarr wipes the series history.
+    dl_hashes = _arr_download_ids(sonarr_url, sonarr_key, "series", target["id"])
     arr_api(sonarr_url, sonarr_key, "DELETE",
             f"/series/{target['id']}?deleteFiles=true&addImportExclusion=false")
+    qbit_note = qbit_delete(dl_hashes)
 
     shows_list = load_json(SHOWS_LIST_FILE, [])
     shows_list = [s for s in shows_list if s.get("sonarr_id") != sonarr_id]
@@ -1944,7 +2241,7 @@ def trim_show(sonarr_id):
     save_json(DATA_DIR / "trimbin_trimmed.json", trimmed)
     log_trim(title, size_gb, "show")
 
-    return True, "ok"
+    return True, qbit_note or "ok"
 
 
 def _match_media_path(explorer_path, arr_path):
@@ -2027,9 +2324,9 @@ def get_quality_profiles():
     return result
 
 
-TRIMBIN_VERSION = "2.7"  # bump on release; compared against GitHub for the update badge
+TRIMBIN_VERSION = "2.8"  # bump on release; compared against GitHub for the update badge
 VERSION_CACHE_FILE = DATA_DIR / "version_check.json"
-TDARR_CACHE_FILE = DATA_DIR / "tdarr_stats.json"
+UNMANIC_CACHE_FILE = DATA_DIR / "unmanic_stats.json"
 
 
 def _netdata_pools():
@@ -2135,49 +2432,67 @@ def version_info(force=False):
     return info
 
 
-def tdarr_stats():
-    """Tdarr global stats via its HTTP API (cruddb StatisticsJSONDB), cached to
-    disk and served from cache when Tdarr is down (it's frequently paused for
-    stability). `recent` transcode events are seeded from Tdarr's storage_saved
-    table — not exposed via cruddb — so they reflect the last full sync."""
-    url = get_config("TDARR_URL").rstrip("/")
-    cached = load_json(TDARR_CACHE_FILE, {})
-    browser = get_config("TDARR_BROWSER_URL") or url
+def _unmanic_api(base, path, body=None):
+    """Call Unmanic's API v2. POST when a body is given (its table endpoints are
+    POST), GET otherwise. Returns the parsed JSON."""
+    url = base + "/unmanic/api/v2" + path
+    if body is not None:
+        req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+    else:
+        req = urllib.request.Request(url)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def unmanic_stats():
+    """Unmanic transcode activity via its API (history / pending / workers), cached
+    to disk and served from cache when Unmanic is unreachable. Unmanic records task
+    counts and the per-task **filename** (`task_label`) but not per-file space
+    savings — its `completedtasks` table has no size columns — so unlike Tdarr there
+    is no 'space saved' figure; the trade is that we can show real filenames."""
+    url = get_config("UNMANIC_URL").rstrip("/")
+    cached = load_json(UNMANIC_CACHE_FILE, {})
+    browser = get_config("UNMANIC_BROWSER_URL") or url
     if not url:
         if cached:
             cached["online"] = False
             return cached
         return {"configured": False, "online": False}
     try:
-        body = json.dumps({"data": {"collection": "StatisticsJSONDB",
-                                    "mode": "getById", "docID": "statistics"}}).encode()
-        req = urllib.request.Request(f"{url}/api/v2/cruddb", data=body,
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            doc = json.loads(resp.read())
-        if isinstance(doc, dict) and "totalTranscodeCount" not in doc:
-            for key in ("data", "doc", "result"):
-                if isinstance(doc.get(key), dict):
-                    doc = doc[key]
-                    break
-        # Guard: don't overwrite a good cache with an unexpected response shape.
-        if not isinstance(doc, dict) or "totalTranscodeCount" not in doc:
-            raise ValueError("unexpected cruddb response shape")
+        hist = _unmanic_api(url, "/history/tasks",
+                            {"start": 0, "length": 12, "search_value": "",
+                             "order_by": "finish_time", "order_direction": "desc"})
+        if not isinstance(hist, dict) or "successCount" not in hist:
+            raise ValueError("unexpected history response shape")
+        try:
+            pend = _unmanic_api(url, "/pending/tasks",
+                                {"start": 0, "length": 1, "search_value": "",
+                                 "order_by": "priority", "order_direction": "desc"})
+            queued = pend.get("recordsTotal", 0)
+        except Exception:
+            queued = None
+        try:
+            ws = _unmanic_api(url, "/workers/status").get("workers_status", [])
+        except Exception:
+            ws = []
+        recent = [{"label": t.get("task_label", ""),
+                   "success": bool(t.get("task_success")),
+                   "finished": t.get("finish_time")}
+                  for t in hist.get("results", [])[:12]]
         out = {
             "configured": True, "online": True,
             "synced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "gb_saved": round(float(doc.get("sizeDiff", 0) or 0), 1),
-            "transcodes": doc.get("totalTranscodeCount", 0),
-            "health_checks": doc.get("totalHealthCheckCount", 0),
-            "files": doc.get("totalFileCount", 0),
-            "score": doc.get("tdarrScore", 0),
-            "warning": (doc.get("processWarning") or "").strip(),
-            "recent": cached.get("recent", []),
-            "by_library": cached.get("by_library", []),
-            "note": cached.get("note", ""),
+            "transcodes": hist.get("successCount", 0),
+            "failed": hist.get("failedCount", 0),
+            "total": hist.get("recordsTotal", 0),
+            "queued": queued,
+            "workers": len(ws),
+            "workers_busy": sum(0 if w.get("idle") else 1 for w in ws),
+            "recent": recent,
             "browser_url": browser,
         }
-        save_json(TDARR_CACHE_FILE, out)
+        save_json(UNMANIC_CACHE_FILE, out)
         return out
     except Exception as e:
         if cached:
@@ -2338,6 +2653,106 @@ def delete_explorer_path(target_path):
     return True, "ok"
 
 
+# ── Orphan deletes (download-root guarded + qBit re-verified) ──────────────
+
+def get_download_root():
+    return (get_config("QBIT_DOWNLOAD_ROOT") or "/downloads").rstrip("/")
+
+
+def _orphan_owned_paths():
+    """Set of content_paths a qBittorrent torrent currently claims. Used to
+    re-verify at delete time that a path is still genuinely an orphan. Returns
+    None if qBit can't be reached — callers MUST refuse to delete on None."""
+    base, opener = _qbit_login()
+    if not base:
+        return None
+    info = json.loads(opener.open(
+        urllib.request.Request(base + "/api/v2/torrents/info?filter=all"), timeout=20).read())
+    return {t.get("content_path", "").rstrip("/") for t in info if t.get("content_path")}
+
+
+def resolve_orphan_hash(phash):
+    for it in load_json(ORPHAN_FILE, {}).get("items", []):
+        if path_hash(it.get("path", "")) == phash:
+            return it.get("path"), it.get("name", "")
+    return None, None
+
+
+def _delete_one_orphan(target_path, owned):
+    """Guarded delete of one orphan path. `owned` is the set of torrent
+    content_paths (None => couldn't reach qBit => refuse; never delete blind)."""
+    if not target_path:
+        return False, "Path not found in scan results"
+    if owned is None:
+        return False, "Could not reach qBittorrent to re-verify — refusing to delete"
+    if not os.path.exists(target_path):
+        return False, "Path no longer exists on disk"
+    root = os.path.realpath(get_download_root())
+    real = os.path.realpath(target_path)
+    if real == root or not real.startswith(root + os.sep):
+        return False, "Path is not under the download root"
+    norm = target_path.rstrip("/")
+    for op in owned:
+        if op == norm or op.startswith(norm + "/") or norm.startswith(op + "/"):
+            return False, "A torrent now claims this path — keeping it"
+    try:
+        if os.path.islink(target_path):
+            os.remove(target_path)
+        elif os.path.isdir(target_path):
+            shutil.rmtree(target_path)
+        else:
+            os.remove(target_path)
+    except Exception as e:
+        return False, str(e)
+    return True, "ok"
+
+
+def _drop_orphan_from_scan(target_path):
+    data = load_json(ORPHAN_FILE, {})
+    items = data.get("items", [])
+    norm = target_path.rstrip("/")
+    new_items = [i for i in items if i.get("path", "").rstrip("/") != norm]
+    if len(new_items) != len(items):
+        data["items"] = new_items
+        data["total_items"] = len(new_items)
+        data["total_real_bytes"] = sum(i.get("real_bytes", 0) for i in new_items)
+        data["total_apparent_bytes"] = sum(i.get("apparent_bytes", 0) for i in new_items)
+        save_json(ORPHAN_FILE, data)
+
+
+def delete_orphan_path(phash):
+    target_path, _label = resolve_orphan_hash(phash)
+    if not target_path:
+        return False, "Orphan not found in scan results"
+    try:
+        owned = _orphan_owned_paths()
+    except Exception as e:
+        return False, f"qBit re-verify failed: {e}"
+    ok, msg = _delete_one_orphan(target_path, owned)
+    if ok:
+        _drop_orphan_from_scan(target_path)
+    return ok, msg
+
+
+def delete_orphan_tier(tier):
+    items = [i for i in load_json(ORPHAN_FILE, {}).get("items", []) if i.get("tier") == tier]
+    if not items:
+        return {"ok": False, "error": "No items in this group"}
+    try:
+        owned = _orphan_owned_paths()
+    except Exception as e:
+        return {"ok": False, "error": f"qBit re-verify failed: {e}"}
+    deleted, errors = 0, []
+    for it in items:
+        ok, msg = _delete_one_orphan(it.get("path", ""), owned)
+        if ok:
+            _drop_orphan_from_scan(it.get("path", ""))
+            deleted += 1
+        elif "no longer exists" not in msg:
+            errors.append(msg)
+    return {"ok": True, "deleted": deleted, "errors": errors[:5]}
+
+
 def _run_scanner(scan_type, script, timeout):
     """Run a scanner subprocess bracketed with scan-progress start/done, so the
     UI can poll /api/scan-progress and show a live bar instead of a dead spinner.
@@ -2368,6 +2783,10 @@ def run_trickplay_scan():
 
 def run_cleanup_scan():
     return _run_scanner("cleanup", "/app/cleanup-scan.py", 300)
+
+
+def run_orphan_scan():
+    return _run_scanner("orphans", "/app/orphan-scan.py", 300)
 
 
 # === Explorer + AI ===
@@ -2675,9 +3094,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/storage-health":
             self._json_response(storage_health())
         elif self.path == "/api/scan-progress":
-            self._json_response(load_json(PROGRESS_FILE, {"active": False}))
-        elif self.path == "/api/tdarr/stats":
-            self._json_response(tdarr_stats())
+            self._json_response(_scan_progress())
+        elif self.path == "/api/unmanic/stats":
+            self._json_response(unmanic_stats())
         elif self.path.startswith("/api/version"):
             force = "force" in urllib.parse.urlparse(self.path).query
             self._json_response(version_info(force=force))
@@ -2708,6 +3127,14 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/scan-trickplay":
             ok, msg = run_trickplay_scan()
             self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path == "/api/scan-orphans":
+            ok, msg = run_orphan_scan()
+            self._json_response({"ok": ok, "error": msg if not ok else None})
+        elif self.path.startswith("/api/orphan-delete-tier/"):
+            self._json_response(delete_orphan_tier(self.path.split("/")[-1]))
+        elif self.path.startswith("/api/orphan-delete/"):
+            ok, msg = delete_orphan_path(self.path.split("/")[-1])
+            self._json_response({"ok": ok, "error": msg if not ok else None})
         elif self.path == "/api/scan-cleanup":
             ok, msg = run_cleanup_scan()
             self._json_response({"ok": ok, "error": msg if not ok else None})
@@ -2731,11 +3158,13 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/trim-show/"):
             sonarr_id = int(self.path.split("/")[-1])
             ok, msg = trim_show(sonarr_id)
-            self._json_response({"ok": ok, "error": msg if not ok else None})
+            self._json_response({"ok": ok, "error": msg if not ok else None,
+                                 "detail": msg if ok else None})
         elif self.path.startswith("/api/trim/"):
             tmdb_id = int(self.path.split("/")[-1])
             ok, msg = trim_movie(tmdb_id)
-            self._json_response({"ok": ok, "error": msg if not ok else None})
+            self._json_response({"ok": ok, "error": msg if not ok else None,
+                                 "detail": msg if ok else None})
         elif self.path.startswith("/api/ignore/"):
             tmdb_id = int(self.path.split("/")[-1])
             ignored = set(load_json(IGNORED_FILE, []))
@@ -2898,6 +3327,7 @@ class Handler(BaseHTTPRequestHandler):
             duplicates_html=build_duplicates_html(),
             trickplay_html=build_trickplay_html(),
             cleanup_html=build_cleanup_html(),
+            orphans_html=build_orphans_html(),
             explorer_html=build_explorer_html(),
             settings_html=build_settings_html(),
         )

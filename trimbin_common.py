@@ -63,19 +63,25 @@ def write_json_atomic(path, data, indent=2):
 # --- Live scan progress (polled by the web UI so long scans aren't a dead spinner) ---
 import time as _time
 
-PROGRESS_FILE = DATA_DIR / "scan_progress.json"
+PROGRESS_FILE = DATA_DIR / "scan_progress.json"  # legacy single-file (unused; see per-type files)
 _last_progress_write = [0.0]
 
 
+def _progress_path(scan_type):
+    """Per-scan-type progress file, so concurrent scans don't clobber each other
+    and the UI can stack them. Must match status-server.py's _progress_path."""
+    return DATA_DIR / f"scan_progress_{scan_type}.json"
+
+
 def progress(scan_type, done=0, total=0, current="", phase="scanning", force=False):
-    """Write a throttled progress record. Best-effort and never raises — a
-    progress write must never break a scan. Throttled to ~2.5 writes/sec."""
+    """Write a throttled per-type progress record. Best-effort and never raises —
+    a progress write must never break a scan. Throttled to ~2.5 writes/sec."""
     now = _time.time()
     if not force and now - _last_progress_write[0] < 0.4:
         return
     _last_progress_write[0] = now
     try:
-        write_json_atomic(PROGRESS_FILE, {
+        write_json_atomic(_progress_path(scan_type), {
             "active": True, "type": scan_type, "phase": phase,
             "done": done, "total": total, "current": current, "updated": now,
         })
@@ -84,8 +90,8 @@ def progress(scan_type, done=0, total=0, current="", phase="scanning", force=Fal
 
 
 def progress_done(scan_type):
-    """Mark the scan finished so the UI stops polling."""
+    """Remove this scan's progress file so the UI drops it from the stack."""
     try:
-        write_json_atomic(PROGRESS_FILE, {"active": False, "type": scan_type, "updated": _time.time()})
+        _progress_path(scan_type).unlink(missing_ok=True)
     except Exception:
         pass
