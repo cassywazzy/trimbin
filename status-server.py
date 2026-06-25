@@ -1495,6 +1495,10 @@ def build_movie_row(m, ignored=False):
         stars = m["rating"]
         badge_rating = f'<span class="badge rating">{stars:g}★</span>'
     slug = slug_from_title(m["title"], m.get("year", ""))
+    # Link by TMDB id: Letterboxd /tmdb/<id>/ redirects to the exact film, so
+    # title collisions (e.g. "Nobody" 2021 vs an older "nobody", or "V/H/S")
+    # resolve to the right listing instead of a slugified-title guess.
+    lb_href = f"https://letterboxd.com/tmdb/{tmdb}/" if tmdb else f"https://letterboxd.com/film/{slug}/"
     title = html.escape(m["title"])
     year = m.get("year", "?")
     size = m["size_gb"]
@@ -1512,7 +1516,7 @@ def build_movie_row(m, ignored=False):
         )
 
     return (
-        f'<tr><td><a class="movie-link" href="https://letterboxd.com/film/{slug}/" '
+        f'<tr><td><a class="movie-link" href="{lb_href}" '
         f'target="_blank">{title}</a> <span class="year">({year})</span>'
         f'{badge_new}{badge_src}{badge_watch}{badge_rating}{badge_auto}</td>'
         f'<td class="size">{size} GB</td>'

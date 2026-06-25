@@ -10,6 +10,7 @@ All notable changes to Trimbin are documented here. Newest entries on top.
   - **Longer, jittered backoff** — `LB_PAGE_SLEEP` (default 6 s) between pages, and a 20/60/120 s backoff on a 403, so a transient block is ridden out rather than aborting the scrape.
 - **Truncated scrapes are now visible** — when a run is cut short by rate-limiting, the scanner logs a warning and sets `lb_scrape: "degraded"` in the status JSON instead of silently reporting success.
 - New config: `LB_INCREMENTAL`, `LB_INCREMENTAL_MAX_PAGES`, `LB_FULL_RESCAN_DAYS`, `LB_PAGE_SLEEP`, `LB_FORCE_FULL`.
+- **Correct Letterboxd links** — movie titles in the UI now link via `https://letterboxd.com/tmdb/<id>/` (which redirects to the exact film) instead of a slug guessed from the title. Films whose title collides with another (Letterboxd disambiguates the slug, e.g. with a `-<year>` suffix) or contains punctuation previously opened the wrong listing.
 
 ## 2026-06-09 — v2.9
 
