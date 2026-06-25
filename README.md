@@ -133,6 +133,18 @@ python cleanup-notify.py     # Run a scan
 | `RADARR_URL` | Radarr base URL (e.g. `http://radarr:7878`) |
 | `RADARR_API_KEY` | Radarr API key (Settings > General) |
 
+### Letterboxd sync (optional tuning)
+
+Letterboxd rate-limits (HTTP 403) aggressive profile scraping. To stay under that limit, Trimbin walks your **diary** incrementally each scan — newest first, stopping at the last film it already knows — and only does a full films-grid reconcile periodically. Watched films accumulate in `lb_watched_cache.json` and are never dropped by a rate-limited partial scrape. The defaults are sensible; tune only if you hit 403s or want a full rebuild.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LB_INCREMENTAL` | `true` | Walk only the diary up to the last-seen film each scan; set `false` to always do a full films-grid walk |
+| `LB_INCREMENTAL_MAX_PAGES` | `5` | Max diary pages to read per incremental scan |
+| `LB_FULL_RESCAN_DAYS` | `14` | How often to force a full reconcile (lets it prune films you've un-logged) |
+| `LB_PAGE_SLEEP` | `6` | Base seconds between page fetches (plus jitter); 403 backoff is a fixed 20/60/120 s |
+| `LB_FORCE_FULL` | `false` | Force a one-off full reconcile on the next scan |
+
 ### Simkl integration
 
 | Variable | Description |

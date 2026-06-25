@@ -2,6 +2,15 @@
 
 All notable changes to Trimbin are documented here. Newest entries on top.
 
+## 2026-06-25 — v2.10
+
+- **Letterboxd scrape: incremental diary sync + rate-limit resilience** — Letterboxd rate-limits (HTTP 403) profile scraping once a scan walks too many pages of your films grid. The old scraper retried only briefly, then aborted mid-pagination, and the watch-list scan overwrote its results with the truncated set — so a recently-watched film could silently drop off the list until a later scan happened to catch it (or until another watch source picked it up). Three changes fix this:
+  - **Watched films now accumulate** in `lb_watched_cache.json` and are only ever merged in, never replaced wholesale — so a rate-limited (partial) scrape can no longer shrink your watched list. A full rebuild that can prune films you've un-logged happens only when a complete walk succeeds, and at most every `LB_FULL_RESCAN_DAYS` (default 14).
+  - **Incremental diary sync** — routine scans read your diary (newest first) and stop at the last film already seen, instead of walking every page of the films grid. This sharply cuts the request volume that triggers the rate-limit. Controlled by `LB_INCREMENTAL` (default on) and `LB_INCREMENTAL_MAX_PAGES` (default 5); falls back to the films grid if the diary is unreachable.
+  - **Longer, jittered backoff** — `LB_PAGE_SLEEP` (default 6 s) between pages, and a 20/60/120 s backoff on a 403, so a transient block is ridden out rather than aborting the scrape.
+- **Truncated scrapes are now visible** — when a run is cut short by rate-limiting, the scanner logs a warning and sets `lb_scrape: "degraded"` in the status JSON instead of silently reporting success.
+- New config: `LB_INCREMENTAL`, `LB_INCREMENTAL_MAX_PAGES`, `LB_FULL_RESCAN_DAYS`, `LB_PAGE_SLEEP`, `LB_FORCE_FULL`.
+
 ## 2026-06-09 — v2.9
 
 - **New "Torrent Orphans" tab** — Finds files in the qBittorrent download root that no torrent points at anymore (failed imports, removed-but-kept torrents, manual leftovers) by diffing the download dir against every torrent's `content_path`. Crucially, it records **both the real on-disk size (`st_blocks`) and the apparent/allocated size (`st_size`)** — qBittorrent pre-allocates the full file size, so an abandoned download can report as 30 GB while occupying ~18 MB on disk. The list shows real size (with the allocated size noted when it's materially larger), sorted and totalled by real usage. Configure with `QBIT_DOWNLOAD_ROOT` (the download root as the container sees it) and a bind mount of that directory.

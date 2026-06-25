@@ -9,6 +9,7 @@ posts a Discord digest.
 import json
 import logging
 import os
+import random
 import re
 import sys
 import time
@@ -42,6 +43,22 @@ def _cfg(key):
     return os.environ.get(key, "")
 
 
+def _cfg_int(key, default):
+    try:
+        return int(_cfg(key))
+    except (TypeError, ValueError):
+        return default
+
+
+def _cfg_bool(key, default):
+    v = _cfg(key).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 LB_USER         = _cfg("LETTERBOXD_USER")
 RADARR_URL      = _cfg("RADARR_URL").rstrip("/")
 RADARR_API_KEY  = _cfg("RADARR_API_KEY")
@@ -57,6 +74,18 @@ HC_PING_URL     = _cfg("HC_PING_URL")
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
 
+# ---- Letterboxd scrape tuning (rate-limit resilience + incremental sync) ----
+# Letterboxd 403s aggressively once it decides you're scraping; once tripped the
+# block outlasts a short retry. So we (a) walk fewer pages by default via an
+# incremental diary scrape that stops at the last-seen film, (b) back off long
+# enough to outlast a block, and (c) never let a truncated scrape shrink the
+# persisted watched set. See [[Trimbin]] History 2026-06-25.
+LB_PAGE_SLEEP            = _cfg_int("LB_PAGE_SLEEP", 6)          # base seconds between page fetches
+LB_403_BACKOFF          = [20, 60, 120]                          # retry sleeps (s) after a 403
+LB_INCREMENTAL          = _cfg_bool("LB_INCREMENTAL", True)      # diary-based incremental sync
+LB_INCREMENTAL_MAX_PAGES = _cfg_int("LB_INCREMENTAL_MAX_PAGES", 5)  # diary pages to walk before stopping
+LB_FULL_RESCAN_DAYS     = _cfg_int("LB_FULL_RESCAN_DAYS", 14)    # force a full reconcile this often
+
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s",
                     stream=sys.stdout)
@@ -64,6 +93,7 @@ log = logging.getLogger("trimbin")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 SLUG_CACHE      = DATA_DIR / "slug_to_tmdb.json"
+LB_WATCHED_CACHE = DATA_DIR / "lb_watched_cache.json"  # accumulator: {slug: rating|null} + full_scrape_ts
 NOTIFIED_FILE   = DATA_DIR / "cleanup_notified_tmdb_ids.json"
 STATUS_FILE     = DATA_DIR / "cleanup_status.json"
 WATCHED_LIST_FILE = DATA_DIR / "cleanup_watched_list.json"
@@ -138,79 +168,211 @@ def ping_hc(suffix=""):
 # Letterboxd scraper
 # ---------------------------------------------------------------------------
 
-def scrape_letterboxd_movies():
-    """Scrape watched films and ratings from Letterboxd profile.
+def _lb_get(url, referer=None):
+    """Fetch a Letterboxd page with long, jittered 403 backoff.
 
-    Returns (watched, ratings) where:
-      watched: {tmdb_id: slug}
-      ratings: {tmdb_id: float} for films with user ratings (0.5-5.0)
+    Returns (html|None, status) where status is one of:
+      "ok"   — html returned
+      "404"  — natural end of pagination
+      "403"  — blocked, gave up after LB_403_BACKOFF retries (caller should
+               treat the scrape as *truncated*, not complete)
+      "error"— transport/other error
+    """
+    for back in [0] + LB_403_BACKOFF:
+        if back:
+            log.warning("letterboxd 403 on %s — backing off %ds", url, back)
+            time.sleep(back + random.uniform(0, back * 0.3))
+        try:
+            return http_get(url, referer=referer), "ok"
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None, "404"
+            if e.code == 403:
+                continue
+            log.error("letterboxd %s: HTTP %d", url, e.code)
+            return None, "error"
+        except Exception as e:
+            log.warning("letterboxd %s: %s", url, e)
+            return None, "error"
+    log.error("letterboxd %s: 403 after %d retries, aborting (partial)", url, len(LB_403_BACKOFF))
+    return None, "403"
+
+
+def _parse_grid(html, acc):
+    """Parse a /films/ grid page; add NEW {slug: rating|None} to acc. Returns count added."""
+    added = 0
+    for item in re.findall(r'<li class="griditem">(.*?)</li>', html, re.DOTALL):
+        sm = re.search(r'data-item-slug="([^"]+)"', item)
+        if not sm:
+            continue
+        slug = sm.group(1)
+        if slug in acc:
+            continue
+        rm = re.search(r'rated-(\d+)', item)
+        acc[slug] = (int(rm.group(1)) / 2.0) if rm else None
+        added += 1
+    if added == 0:  # fallback for markup changes
+        for slug in re.findall(r'data-target-link="/film/([^"/]+)/"', html):
+            if slug not in acc:
+                acc[slug] = None
+                added += 1
+    return added
+
+
+def _parse_diary(html):
+    """Return diary slugs in document order (newest-watched first)."""
+    out, seen = [], set()
+    for m in re.finditer(r'data-(?:film|item)-slug="([^"]+)"|data-target-link="/film/([^"/]+)/"', html):
+        slug = m.group(1) or m.group(2)
+        if slug and slug not in seen:
+            seen.add(slug)
+            out.append(slug)
+    return out
+
+
+def _scrape_films_full():
+    """Walk every page of /{user}/films/. Returns (slug_to_rating, aborted)."""
+    acc = {}
+    base = f"https://letterboxd.com/{LB_USER}/films/"
+    page = 1
+    while True:
+        html, status = _lb_get(f"{base}page/{page}/", referer=base)
+        if status == "403":
+            return acc, True               # truncated
+        if html is None:
+            break                          # 404/error → natural end
+        added = _parse_grid(html, acc)
+        if added == 0:
+            break
+        log.info("letterboxd films page %d: +%d (total %d)", page, added, len(acc))
+        page += 1
+        time.sleep(LB_PAGE_SLEEP + random.uniform(0, LB_PAGE_SLEEP * 0.5))
+    return acc, False
+
+
+def _scrape_recent(prev_slugs):
+    """Incremental: collect newly-watched slugs up to the last-seen point.
+
+    Walks the diary (newest-first) and stops as soon as a page contributes no
+    slugs we haven't already seen. Falls back to the first /films/ pages only if
+    the diary is unreachable. Returns (new_slug_to_rating, aborted)."""
+    new = {}
+    base = f"https://letterboxd.com/{LB_USER}/films/diary/"
+    diary_ok = False
+    for page in range(1, LB_INCREMENTAL_MAX_PAGES + 1):
+        url = base if page == 1 else f"{base}page/{page}/"
+        html, status = _lb_get(url, referer=base)
+        if status == "403":
+            return new, True               # truncated — keep what we got
+        if html is None:
+            diary_ok = True
+            break
+        diary_ok = True
+        page_slugs = _parse_diary(html)
+        if not page_slugs:
+            break
+        fresh = [s for s in page_slugs if s not in prev_slugs and s not in new]
+        for s in fresh:
+            new[s] = None                  # rating backfilled by the periodic full reconcile
+        log.info("letterboxd diary page %d: %d entries, +%d new", page, len(page_slugs), len(fresh))
+        if not fresh:                      # reached previously-seen territory
+            break
+        time.sleep(LB_PAGE_SLEEP + random.uniform(0, LB_PAGE_SLEEP * 0.5))
+
+    if diary_ok:
+        return new, False
+
+    log.warning("letterboxd diary unreachable — falling back to /films/ front pages")
+    base2 = f"https://letterboxd.com/{LB_USER}/films/"
+    for page in range(1, 3):
+        html, status = _lb_get(f"{base2}page/{page}/", referer=base2)
+        if status == "403":
+            return new, True
+        if html is None:
+            break
+        tmp = {}
+        _parse_grid(html, tmp)
+        fresh = {s: r for s, r in tmp.items() if s not in prev_slugs and s not in new}
+        if not fresh and page > 1:
+            break
+        new.update(fresh)
+        time.sleep(LB_PAGE_SLEEP + random.uniform(0, LB_PAGE_SLEEP * 0.5))
+    return new, False
+
+
+def _now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _full_rescan_due(ts):
+    if not ts:
+        return True
+    try:
+        dt = datetime.strptime(ts, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc)
+    except Exception:
+        return True
+    return (datetime.now(timezone.utc) - dt).days >= LB_FULL_RESCAN_DAYS
+
+
+def scrape_letterboxd_movies():
+    """Return (watched, ratings, complete).
+
+      watched:  {tmdb_id: slug}   ratings: {tmdb_id: float}
+      complete: False if Letterboxd 403-truncated this run (caller should treat
+                the result as possibly missing brand-new films, not authoritative)
+
+    Watched slugs accumulate in LB_WATCHED_CACHE and are only ever *unioned* in,
+    so a rate-limited run can never shrink the set. The set is rebuilt from
+    scratch (allowing removals) only on a successful, complete periodic full walk.
     """
     if not LB_USER:
         log.info("LETTERBOXD_USER not set, skipping Letterboxd")
-        return {}, {}
-    slugs = []
-    seen = set()
-    slug_to_rating = {}
-    base_url = f"https://letterboxd.com/{LB_USER}/films/"
-    page = 1
-    while True:
-        url = f"{base_url}page/{page}/"
-        html_text = None
-        for attempt in range(3):
-            try:
-                html_text = http_get(url, referer=base_url)
-                break
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    break
-                if e.code == 403 and attempt < 2:
-                    log.warning("letterboxd page %d: 403, retrying in %ds", page, 10 * (attempt + 1))
-                    time.sleep(10 * (attempt + 1))
-                    continue
-                if e.code == 403:
-                    log.error("letterboxd page %d: 403 after 3 attempts, aborting scrape", page)
-                    break
-                raise
-        if html_text is None:
-            break
-        page_slugs = []
-        for item in re.findall(r'<li class="griditem">(.*?)</li>', html_text, re.DOTALL):
-            sm = re.search(r'data-item-slug="([^"]+)"', item)
-            if not sm:
-                continue
-            slug = sm.group(1)
-            if slug in seen:
-                continue
-            page_slugs.append(slug)
-            seen.add(slug)
-            rm = re.search(r'rated-(\d+)', item)
-            if rm:
-                slug_to_rating[slug] = int(rm.group(1)) / 2.0
-        if not page_slugs:
-            alt = re.findall(r'data-target-link="/film/([^"/]+)/"', html_text)
-            page_slugs = [s for s in alt if s not in seen]
-            for s in page_slugs:
-                seen.add(s)
-        if not page_slugs:
-            break
-        slugs.extend(page_slugs)
-        log.info("letterboxd page %d: %d films (total %d)", page, len(page_slugs), len(slugs))
-        page += 1
-        time.sleep(4)
+        return {}, {}, True
+
+    cache = load_json(LB_WATCHED_CACHE, {})
+    if not isinstance(cache, dict):
+        cache = {}
+    prev = cache.get("slugs", {}) if isinstance(cache.get("slugs"), dict) else {}
+    last_full = cache.get("full_scrape_ts")
+
+    force_full = (not prev) or (not LB_INCREMENTAL) \
+        or _full_rescan_due(last_full) or _cfg_bool("LB_FORCE_FULL", False)
+
+    complete = True
+    if force_full:
+        why = ("first run" if not prev else
+               "incremental disabled" if not LB_INCREMENTAL else "periodic reconcile")
+        log.info("letterboxd: full scrape (%s)", why)
+        full_sr, aborted = _scrape_films_full()
+        if aborted:
+            merged = dict(prev)            # union — don't lose prior watches
+            merged.update(full_sr)
+            complete = False               # leave full_scrape_ts so we retry full next run
+        else:
+            merged = full_sr               # authoritative — allows pruning un-logged films
+            last_full = _now_iso()
+    else:
+        log.info("letterboxd: incremental scrape (%d known)", len(prev))
+        new_sr, aborted = _scrape_recent(prev)
+        merged = dict(prev)
+        merged.update(new_sr)
+        complete = not aborted
+        log.info("letterboxd incremental: +%d new (total known %d)", len(new_sr), len(merged))
+
+    save_json(LB_WATCHED_CACHE, {"slugs": merged, "full_scrape_ts": last_full})
 
     slug_cache = load_json(SLUG_CACHE, {})
-    watched = {}
-    ratings = {}
-    for slug in slugs:
+    watched, ratings = {}, {}
+    for slug, rating in merged.items():
         tmdb = _resolve_slug(slug, slug_cache)
         if tmdb is not None:
             watched[tmdb] = slug
-            if slug in slug_to_rating:
-                ratings[tmdb] = slug_to_rating[slug]
+            if rating is not None:
+                ratings[tmdb] = rating
     save_json(SLUG_CACHE, slug_cache)
-    log.info("letterboxd: %d/%d resolved to TMDB IDs, %d have ratings",
-             len(watched), len(slugs), len(ratings))
-    return watched, ratings
+    log.info("letterboxd: %d/%d watched slugs resolved, %d rated, complete=%s",
+             len(watched), len(merged), len(ratings), complete)
+    return watched, ratings, complete
 
 
 def scrape_letterboxd_likes():
@@ -221,23 +383,7 @@ def scrape_letterboxd_likes():
     base_url = f"https://letterboxd.com/{LB_USER}/likes/films/"
     page = 1
     while True:
-        url = f"{base_url}page/{page}/"
-        html_text = None
-        for attempt in range(3):
-            try:
-                html_text = http_get(url, referer=base_url)
-                break
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    break
-                if e.code == 403 and attempt < 2:
-                    log.warning("letterboxd likes page %d: 403, retrying in %ds", page, 10 * (attempt + 1))
-                    time.sleep(10 * (attempt + 1))
-                    continue
-                if e.code == 403:
-                    log.error("letterboxd likes page %d: 403 after 3 attempts, aborting", page)
-                    break
-                raise
+        html_text, status = _lb_get(f"{base_url}page/{page}/", referer=base_url)
         if html_text is None:
             break
         page_slugs = re.findall(r'data-item-slug="([^"]+)"', html_text)
@@ -250,7 +396,7 @@ def scrape_letterboxd_likes():
         log.info("letterboxd likes page %d: %d films (total %d)",
                  page, len(new), len(liked_slugs))
         page += 1
-        time.sleep(4)
+        time.sleep(LB_PAGE_SLEEP + random.uniform(0, LB_PAGE_SLEEP * 0.5))
 
     slug_cache = load_json(SLUG_CACHE, {})
     liked_tmdb = set()
@@ -697,7 +843,10 @@ def _scan():
             min_rating = None
 
     # ---- Movies ----
-    lb_watched, lb_ratings = scrape_letterboxd_movies()
+    lb_watched, lb_ratings, lb_complete = scrape_letterboxd_movies()
+    if not lb_complete:
+        log.warning("letterboxd scrape was TRUNCATED (rate-limited) — watched set "
+                    "preserved from cache, but brand-new films may be missing this run")
     lb_likes = scrape_letterboxd_likes() if auto_ignore_liked else set()
     simkl_watched = fetch_simkl_movies()
     trakt_watched = _fetch_trakt_movies()  # no-op unless TRAKT_CLIENT_ID + TRAKT_USERNAME are set
@@ -843,7 +992,8 @@ def _scan():
     log.info("shows on disk: %d (%.0f GB)", shows_count, shows_gb)
 
     # ---- Write data ----
-    write_status(total_count, total_gb, len(new_watches), new_gb, shows_count, shows_gb)
+    write_status(total_count, total_gb, len(new_watches), new_gb, shows_count, shows_gb,
+                 lb_ok=lb_complete)
     save_json(WATCHED_LIST_FILE, watched_on_disk)
     save_json(SHOWS_LIST_FILE, shows_on_disk)
 
@@ -889,7 +1039,7 @@ def _scan():
     log.info("done")
 
 
-def write_status(movie_count, movie_gb, new_count, new_gb, show_count=0, show_gb=0):
+def write_status(movie_count, movie_gb, new_count, new_gb, show_count=0, show_gb=0, lb_ok=True):
     save_json(STATUS_FILE, {
         "watched_on_disk": movie_count,
         "total_gb": round(movie_gb),
@@ -897,6 +1047,7 @@ def write_status(movie_count, movie_gb, new_count, new_gb, show_count=0, show_gb
         "new_gb": round(new_gb),
         "shows_on_disk": show_count,
         "shows_gb": round(show_gb),
+        "lb_scrape": "ok" if lb_ok else "degraded",
         "last_run": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     })
 

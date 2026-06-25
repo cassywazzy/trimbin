@@ -2324,7 +2324,7 @@ def get_quality_profiles():
     return result
 
 
-TRIMBIN_VERSION = "2.8"  # bump on release; compared against GitHub for the update badge
+TRIMBIN_VERSION = "2.10"  # bump on release; compared against GitHub for the update badge
 VERSION_CACHE_FILE = DATA_DIR / "version_check.json"
 UNMANIC_CACHE_FILE = DATA_DIR / "unmanic_stats.json"
 
