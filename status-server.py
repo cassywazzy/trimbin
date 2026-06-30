@@ -238,7 +238,7 @@ PAGE_TEMPLATE = Template("""<!DOCTYPE html>
 <script defer src="https://d3js.org/d3.v7.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px;max-width:1000px;margin:0 auto}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#1a1a2e;color:#e0e0e0;padding:20px;max-width:1200px;margin:0 auto}
 h1{color:#00d474;margin-bottom:4px;font-size:1.5em}
 h2{color:#aaa;margin:28px 0 12px;font-size:1.1em;font-weight:600;border-bottom:1px solid #0f3460;padding-bottom:6px}
 .subtitle{color:#888;margin-bottom:20px;font-size:.9em}
@@ -248,8 +248,8 @@ h2{color:#aaa;margin:28px 0 12px;font-size:1.1em;font-weight:600;border-bottom:1
 .stat .label{font-size:.75em;color:#888;margin-top:4px}
 .stat.warn .value{color:#f39c12}
 .stat.danger .value{color:#e94560}
-.tabs{display:flex;gap:0;margin-bottom:0}
-.tab{padding:10px 24px;cursor:pointer;background:#0f3460;color:#888;border:1px solid #0f3460;border-bottom:none;border-radius:8px 8px 0 0;font-size:.9em;font-weight:600}
+.tabs{display:flex;gap:0;margin-bottom:0;overflow-x:auto}
+.tab{padding:10px 24px;cursor:pointer;background:#0f3460;color:#888;border:1px solid #0f3460;border-bottom:none;border-radius:8px 8px 0 0;font-size:.9em;font-weight:600;white-space:nowrap}
 .tab.active{background:#16213e;color:#00d474;border-color:#0f3460}
 .tab-content{display:none}
 .tab-content.active{display:block}
@@ -404,6 +404,78 @@ button.refresh-btn .spin{display:inline-block;animation:spin 1s linear infinite}
 }
 </style>
 <script>
+function jamEsc(s){return String(s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function jamDate(ts){
+  if(!ts) return 'Unknown session';
+  var d=new Date(ts*1000);
+  if(isNaN(d.getTime())) return 'Unknown session';
+  return d.toLocaleDateString(undefined,{weekday:'short',year:'numeric',month:'short',day:'numeric'});
+}
+function loadJammed(){
+  var box=document.getElementById('jammed-list'); if(!box) return; box.innerHTML='Loading&hellip;';
+  fetch('/api/jammed').then(function(r){return r.json();}).then(function(d){
+    var ts=(d&&d.tracks)||[];
+    if(!ts.length){box.innerHTML='<p class="subtitle">No Jam downloads in the library.</p>';return;}
+    var groups={}, order=[];
+    ts.forEach(function(t){
+      var k=String(t.session_id||'_');
+      if(!groups[k]){groups[k]={latest:0,items:[]};order.push(k);}
+      groups[k].items.push(t);
+      if((t.added_at||0)>groups[k].latest) groups[k].latest=t.added_at||0;
+    });
+    order.sort(function(a,b){return groups[b].latest-groups[a].latest;});
+    var html='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px">'
+      +'<label style="cursor:pointer;font-size:.85em;color:#aaa"><input type="checkbox" id="jam-all" onchange="jamToggleAll(this)" style="vertical-align:middle;margin-right:6px">Select all</label>'
+      +'<button class="jam-del" onclick="jamDeleteSelected(this)" style="background:#b3261e;color:#fff;border:0;border-radius:6px;padding:6px 14px;cursor:pointer">Delete selected</button></div>';
+    order.forEach(function(k){
+      var g=groups[k];
+      html+='<div class="jam-session" style="margin-bottom:20px">'
+        +'<h3 style="color:#00d474;font-size:.95em;margin:0 0 6px;border-bottom:1px solid #0f3460;padding-bottom:5px;text-transform:none;letter-spacing:0">'
+        +jamEsc(jamDate(g.latest))+' <span style="color:#666;font-weight:400">&middot; '+g.items.length+' track'+(g.items.length===1?'':'s')+'</span></h3>';
+      html+=g.items.map(function(t){
+        return '<div class="jam-row" style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #2a2a2a;gap:10px">'
+          +'<label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer;min-width:0">'
+          +'<input type="checkbox" class="jam-cb" data-id="'+t.id+'" style="flex:none">'
+          +'<span style="min-width:0;overflow:hidden;text-overflow:ellipsis"><b>'+jamEsc(t.title)+'</b> &mdash; '+jamEsc(t.artist)+'</span></label>'
+          +'<button onclick="purgeJammed('+t.id+',this)" style="background:#b3261e;color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer;flex:none">Delete</button></div>';
+      }).join('');
+      html+='</div>';
+    });
+    box.innerHTML=html;
+  }).catch(function(){box.innerHTML='<p class="subtitle">Could not reach the Jam app.</p>';});
+}
+function jamToggleAll(cb){
+  document.querySelectorAll('#jammed-list .jam-cb').forEach(function(x){x.checked=cb.checked;});
+}
+function jamPruneEmpty(){
+  var box=document.getElementById('jammed-list');
+  document.querySelectorAll('#jammed-list .jam-session').forEach(function(sec){
+    if(!sec.querySelector('.jam-row')) sec.remove();
+  });
+  if(box && !box.querySelector('.jam-row')) box.innerHTML='<p class="subtitle">No Jam downloads in the library.</p>';
+}
+function purgeJammed(id,btn){
+  if(!confirm('Delete this Jam download from the music library for good?'))return;
+  if(btn)btn.disabled=true;
+  fetch('/api/jammed/purge/'+id,{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    if(d&&d.ok){var row=btn&&btn.closest('.jam-row');if(row)row.remove();jamPruneEmpty();}else if(btn)btn.disabled=false;
+  });
+}
+function jamDeleteSelected(btn){
+  var cbs=Array.prototype.slice.call(document.querySelectorAll('#jammed-list .jam-cb:checked'));
+  if(!cbs.length){alert('No tracks selected.');return;}
+  if(!confirm('Delete '+cbs.length+' selected Jam download'+(cbs.length===1?'':'s')+' from the music library for good?'))return;
+  if(btn)btn.disabled=true;
+  Promise.all(cbs.map(function(cb){
+    return fetch('/api/jammed/purge/'+cb.getAttribute('data-id'),{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+      if(d&&d.ok){var row=cb.closest('.jam-row');if(row)row.remove();}
+    }).catch(function(){});
+  })).then(function(){
+    if(btn)btn.disabled=false;
+    var all=document.getElementById('jam-all'); if(all)all.checked=false;
+    jamPruneEmpty();
+  });
+}
 function switchTab(name) {
   document.querySelectorAll('.tab-content').forEach(function(t) { t.classList.remove('active'); });
   document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
@@ -411,6 +483,7 @@ function switchTab(name) {
   if (el) el.classList.add('active');
   var btn = document.querySelector('.tab[data-tab="' + name + '"]');
   if (btn) btn.classList.add('active');
+  if (name === 'jammed') loadJammed();
   window.location.hash = name;
 }
 </script>
@@ -446,6 +519,7 @@ function switchTab(name) {
 <div class="tab" data-tab="orphans" onclick="switchTab('orphans')">Orphans</div>
 <div class="tab" data-tab="explorer" onclick="switchTab('explorer')">Explorer</div>
 <div class="tab" data-tab="unmanic" onclick="switchTab('unmanic')">Unmanic</div>
+<div class="tab" data-tab="jammed" onclick="switchTab('jammed')">Jammed</div>
 <div class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</div>
 </div>
 
@@ -488,6 +562,11 @@ $explorer_html
 <div id="unmanic-body"><div class="empty">Loading&hellip;</div></div>
 </div>
 
+<div id="tab-jammed" class="tab-content">
+<h2 style="margin-top:0">Jammed Songs <button class="refresh-btn" onclick="loadJammed()" style="margin-left:8px">&#8635;</button></h2>
+<p class="subtitle">Tracks the Jam app downloaded for parties, still in your music library &mdash; prune the junk.</p>
+<div id="jammed-list">Loading&hellip;</div>
+</div>
 <div id="tab-settings" class="tab-content">
 $settings_html
 </div>
@@ -1444,14 +1523,21 @@ function loadUnmanic(btn) {
     origSwitch(name);
     if (name === 'explorer' && !explorerData) { initExplorer(); checkAiStatus(); }
     if (name === 'unmanic' && !unmanicLoaded) { loadUnmanic(); }
+    if (name === 'jammed') { loadJammed(); }
   };
   // Re-check hash after override is in place
   var h = window.location.hash.replace('#', '');
   if (h === 'explorer') { initExplorer(); checkAiStatus(); }
   if (h === 'unmanic') { loadUnmanic(); }
+  if (h === 'jammed') { loadJammed(); }
   loadPoolHealth();
   loadVersion();
   pollScans();  // resume the progress stack if a scan is still running (e.g. after a reload)
+  // Fit the page to the exact width of the tab strip (+ body padding) so the
+  // container never extends past the tabs. CSS alone can't do this safely (wide
+  // table text would force it wider), so measure the rendered tab row.
+  var _tabs=document.querySelectorAll('.tabs > .tab');
+  if(_tabs.length){var _w=0;_tabs.forEach(function(t){_w+=t.getBoundingClientRect().width;});var _cs=getComputedStyle(document.body);var _pad=(parseFloat(_cs.paddingLeft)||0)+(parseFloat(_cs.paddingRight)||0);document.body.style.maxWidth=Math.ceil(_w+_pad+1)+'px';}
 })();
 </script>
 </body></html>""")
@@ -2328,7 +2414,7 @@ def get_quality_profiles():
     return result
 
 
-TRIMBIN_VERSION = "2.10"  # bump on release; compared against GitHub for the update badge
+TRIMBIN_VERSION = "2.11"  # bump on release; compared against GitHub for the update badge
 VERSION_CACHE_FILE = DATA_DIR / "version_check.json"
 UNMANIC_CACHE_FILE = DATA_DIR / "unmanic_stats.json"
 
@@ -3057,6 +3143,44 @@ For each item, recommend: "keep", "consider_deleting", or "safe_to_delete" with 
     return {"recommendations": recs, "model": model}
 
 
+# Grayson-Jam-style companion app (see README "Jammed" tab). Set GJ_URL to your
+# Jam instance, container-reachable (e.g. via Docker service name or LXC IP).
+GJ_URL = os.environ.get("GJ_URL", "http://jam:8588")
+
+
+def _jam_headers():
+    h = {"Accept": "application/json"}
+    try:
+        import os as _os
+        k = _os.environ.get("JAM_ADMIN_KEY", "")
+        if k:
+            h["X-Jam-Key"] = k
+    except Exception:
+        pass
+    return h
+
+
+def jammed_list():
+    try:
+        req = urllib.request.Request(GJ_URL + "/api/acquired", headers=_jam_headers())
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        return {"ok": False, "error": str(e), "tracks": []}
+
+
+def jammed_purge(item_id):
+    try:
+        body = json.dumps({"item_id": int(item_id)}).encode()
+        hdr = _jam_headers()
+        hdr["Content-Type"] = "application/json"
+        req = urllib.request.Request(GJ_URL + "/api/acquired/purge", data=body, headers=hdr, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/status":
@@ -3104,6 +3228,8 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/version"):
             force = "force" in urllib.parse.urlparse(self.path).query
             self._json_response(version_info(force=force))
+        elif self.path == "/api/jammed":
+            self._json_response(jammed_list())
         elif self.path == "/ping":
             self.send_response(200)
             self.end_headers()
@@ -3164,6 +3290,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg = trim_show(sonarr_id)
             self._json_response({"ok": ok, "error": msg if not ok else None,
                                  "detail": msg if ok else None})
+        elif self.path.startswith("/api/jammed/purge/"):
+            self._json_response(jammed_purge(self.path.rsplit("/", 1)[-1]))
         elif self.path.startswith("/api/trim/"):
             tmdb_id = int(self.path.split("/")[-1])
             ok, msg = trim_movie(tmdb_id)

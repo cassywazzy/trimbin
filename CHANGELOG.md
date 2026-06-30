@@ -2,6 +2,12 @@
 
 All notable changes to Trimbin are documented here. Newest entries on top.
 
+## 2026-06-29 — v2.11
+
+- **New "Jammed" tab** — Integrates with a companion "Jam" party-jukebox app: lists the tracks that app downloaded into your music library, **grouped by listening session**, so you can prune one-off party downloads after the night. Per-track checkboxes plus **Select all / Delete selected** for bulk cleanup, alongside per-track delete. Enable by setting `GJ_URL` to your Jam instance (it must expose `/api/acquired` and `/api/acquired/purge`); the tab is dormant otherwise. New endpoints `GET /api/jammed`, `POST /api/jammed/purge/<id>` (thin authenticated proxies to the Jam app).
+- **Page width fits the tabs** — The layout now measures the tab strip at load and sizes the page to it, so content aligns with the tabs instead of stretching across the window.
+- **Fixes** — The Jammed tab now loads on click (a duplicate `switchTab` definition had shadowed its loader, so only the refresh button populated it). The header update badge no longer shows a false "update available" when you're on the current version.
+
 ## 2026-06-25 — v2.10
 
 - **Letterboxd scrape: incremental diary sync + rate-limit resilience** — Letterboxd rate-limits (HTTP 403) profile scraping once a scan walks too many pages of your films grid. The old scraper retried only briefly, then aborted mid-pagination, and the watch-list scan overwrote its results with the truncated set — so a recently-watched film could silently drop off the list until a later scan happened to catch it (or until another watch source picked it up). Three changes fix this:

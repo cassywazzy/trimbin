@@ -53,6 +53,7 @@ The status server provides a dark-themed dashboard at port 5380:
 - Summary stats: movies on disk, reclaimable GB, shows on disk, new since last scan, total trimmed
 - **Movies tab**: movie table with Letterboxd links, source badges, watch count badges, file sizes, and action buttons (Trim / Ignore / Radarr)
 - **Shows tab**: show table with episode progress bars, watched percentage, file sizes, and action buttons (Trim / Sonarr)
+- **Jammed tab**: tracks a companion "Jam" party-jukebox app downloaded into your music library, grouped by listening session, with per-track checkboxes + bulk delete (requires `GJ_URL`)
 - Confirmation dialog before any deletion
 - Ignored movies section (greyed out, with Restore button)
 
@@ -179,6 +180,12 @@ When configured, trimming a movie/show also removes the associated torrent(s) fr
 | `JELLYSTAT_API_KEY` | Jellystat API token (from Jellystat settings) |
 | `JELLYFIN_URL` | Jellyfin base URL (e.g. `http://jellyfin:8096`) |
 | `JELLYFIN_API_KEY` | Jellyfin API key (Dashboard > API Keys) |
+
+### Jam companion app (optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GJ_URL` | `http://jam:8588` | URL of a companion "Jam" party-jukebox app that exposes `/api/acquired` + `/api/acquired/purge`. When reachable, the **Jammed** tab lists tracks that app downloaded for parties (grouped by session) so you can prune them from your music library. |
 
 ### Monitoring
 
